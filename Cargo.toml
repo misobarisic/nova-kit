@@ -1,0 +1,7 @@
+[workspace]
+members = ["crates/storage"]
+resolver = "3"
+
+[workspace.package]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/misobarisic/nova-kit"
