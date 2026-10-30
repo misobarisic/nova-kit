@@ -422,6 +422,40 @@ fn read_keys_and_prefixes_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use redb::StorageBackend;
+    use std::sync::Arc;
+
+    // Keep access to the same locked file handle that redb uses. Opening a
+    // second handle for raw snapshots fails under Windows' mandatory locks.
+    #[derive(Debug)]
+    struct SharedFileBackend(Arc<redb::backends::FileBackend>);
+
+    impl StorageBackend for SharedFileBackend {
+        fn len(&self) -> std::io::Result<u64> {
+            self.0.len()
+        }
+        fn read(&self, offset: u64, out: &mut [u8]) -> std::io::Result<()> {
+            self.0.read(offset, out)
+        }
+        fn set_len(&self, len: u64) -> std::io::Result<()> {
+            self.0.set_len(len)
+        }
+        fn sync_data(&self) -> std::io::Result<()> {
+            self.0.sync_data()
+        }
+        fn write(&self, offset: u64, data: &[u8]) -> std::io::Result<()> {
+            self.0.write(offset, data)
+        }
+        fn close(&self) -> std::io::Result<()> {
+            self.0.close()
+        }
+    }
+
+    fn snapshot(backend: &impl StorageBackend) -> Vec<u8> {
+        let mut bytes = vec![0; usize::try_from(backend.len().unwrap()).unwrap()];
+        backend.read(0, &mut bytes).unwrap();
+        bytes
+    }
 
     #[test]
     fn local_sequences_survive_restart_and_ignore_lower_clock_seeds() {
@@ -534,7 +568,16 @@ mod tests {
     fn legacy_migration_is_atomic_and_equivalent_writes_leave_file_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.redb");
-        let db = Database::create(&path).unwrap();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let backend = Arc::new(redb::backends::FileBackend::new(file).unwrap());
+        let db = Database::builder()
+            .create_with_backend(SharedFileBackend(backend.clone()))
+            .unwrap();
         let value =
             serde_json::json!({"episodes": vec!["artwork"; 1000], "version": 1}).to_string();
         assert!(write(&db, "episodes:old", &value, false));
@@ -550,14 +593,18 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let before = std::fs::read(&path).unwrap();
+        let before = snapshot(backend.as_ref());
         let reordered = serde_json::to_string_pretty(
             &serde_json::from_str::<serde_json::Value>(&value).unwrap(),
         )
         .unwrap();
         assert!(!write(&db, "episodes:old", &reordered, true));
-        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(
+            snapshot(backend.as_ref()) == before,
+            "equivalent writes must leave database bytes unchanged"
+        );
         drop(db);
+        drop(backend);
         let db = Database::open(&path).unwrap();
         assert_eq!(read_from(&db, "episodes:old").unwrap().unwrap().0, value);
         assert!(write_to(&db, &[("episodes:old".into(), None)], false).unwrap());
