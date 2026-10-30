@@ -1,0 +1,76 @@
+import { ControlInput, SliderGesture } from "@NovaUiShared";
+import { ControlTouchArea } from "control-input.slint";
+// Shared by the numeric settings sliders and playback-speed control. The
+// Settings page yields its vertical pan for the entire slider gesture.
+
+
+export component SliderTouchArea inherits ControlTouchArea {
+    // Dense panels need vertical swipes to work even when they start on a
+    // slider. Mouse input and the single playback-speed slider keep their
+    // immediate ownership, including protection against diagonal wobble.
+    in property <bool> allow-vertical-pan: false;
+    out property <bool> adjusting: root.owns-gesture;
+    out property <bool> vertical-pan: root.gesture-axis == 2;
+    private property <bool> owns-gesture: false;
+    private property <bool> touch-gesture: ControlInput.touch-feedback;
+    private property <bool> choose-axis: root.allow-vertical-pan && root.touch-gesture;
+    private property <int> gesture-axis: 0; // pending, horizontal, vertical
+    private property <bool> origin-known: false;
+    private property <length> origin-x;
+    private property <length> origin-y;
+    private property <bool> pan-blocked: root.feedback-active
+        && (!root.choose-axis || root.owns-gesture);
+
+    function claim() {
+        root.owns-gesture = true;
+        SliderGesture.active = true;
+    }
+
+    function release() {
+        if (root.owns-gesture) {
+            root.owns-gesture = false;
+            SliderGesture.active = false;
+        }
+    }
+
+    pointer-event(event) => {
+        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+            root.touch-gesture = ControlInput.touch-feedback || event.touch-finger-id != 0;
+            root.gesture-axis = 0;
+            root.origin-x = root.mouse-x;
+            root.origin-y = root.mouse-y;
+            root.origin-known = true;
+            if !root.choose-axis { root.claim(); }
+        } else if (event.kind == PointerEventKind.move && (root.pressed || event.touch-finger-id != 0)) {
+            // Touch moves may precede the Flickable's delayed press. Retain
+            // their first position until enough movement establishes an axis.
+            root.touch-gesture = ControlInput.touch-feedback || event.touch-finger-id != 0;
+            if !root.choose-axis {
+                root.claim();
+            } else {
+                if !root.origin-known {
+                    root.origin-x = root.mouse-x;
+                    root.origin-y = root.mouse-y;
+                    root.origin-known = true;
+                    root.gesture-axis = 0;
+                }
+                let dx = Math.abs(root.mouse-x - root.origin-x);
+                let dy = Math.abs(root.mouse-y - root.origin-y);
+                if root.gesture-axis == 0 && Math.max(dx, dy) > 6px {
+                    root.gesture-axis = dy > dx ? 2 : 1;
+                }
+                if root.gesture-axis == 1 { root.claim(); }
+            }
+        } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+            root.release();
+            root.origin-known = false;
+        } else if event.kind == PointerEventKind.move {
+            root.touch-gesture = ControlInput.touch-feedback;
+        }
+    }
+    changed pressed => { if (!root.pressed) { root.release(); } }
+    // Yield before a mouse press too: otherwise a quick diagonal drag can
+    // reach the Flickable's capture threshold before its delayed press arrives.
+    changed pan-blocked => { SliderGesture.hovered = root.pan-blocked; }
+    changed enabled => { if (!root.enabled) { root.release(); } }
+}

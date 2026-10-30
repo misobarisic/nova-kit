@@ -1,0 +1,24 @@
+import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
+import { Dropdown } from "@NovaUiBase/dropdown.slint";
+import { FeedbackProgress } from "@NovaUiBase/feedback-motion.slint";
+import { LibraryFilterChip } from "@NovaUiBase/filter-chip.slint";
+import { IcPlay, IcInfo, IcStarBorder, IcSchedule, IcPause, IcVolumeUp, IcVolumeOff, IcReplay10, IcForward10, IcCaptions, IcMusic, IcFullscreen, IcFullscreenExit, IcClose, IcChevronRight, IcChevronLeft, IcChevronDown, IcChevronUp, IcCheck, IcExtension, IcTag, IcBookmarkBorder, IcBookmark, IcImage, IcDisplay, IcHome, IcSearch, IcExplore, IcVideoLibrary, IcSettingsGear, IcSync, IcDelete, IcAdd, IcMoreHoriz, IcCalendar, IcDownload, IcMyAnimeList, IcAniList, IcEdit, IcOpenInNew, IcHistory, IcLink, IcCamera, IcCast } from "@NovaUiBase/icons.slint";
+import { KbMark } from "@NovaUiBase/kbnav.slint";
+import { LibraryScroll } from "@NovaUiBase/library-scroll.slint";
+import { MenuSheet } from "@NovaUiBase/menusheet.slint";
+import { ScrollView } from "@NovaUiBase/scrollview.slint";
+import { SearchField } from "@NovaUiBase/searchfield.slint";
+import { PillButton, ToggleSwitch, AddonIconButton, AddonRowCard, MiniSlider, Segmented, SectionHeader, ValueBox, SettingsLink, SettingsCard, SettingsBackButton, SettingsHeader, SettingsInput } from "@NovaUiBase/settings-controls.slint";
+import { SliderTouchArea } from "@NovaUiBase/slider-touch.slint";
+export component ComponentsSmoke inherits Window {
+    VerticalLayout {
+        PillButton { label: "Save"; }
+        ToggleSwitch {}
+        Dropdown { model: ["One", "Two"]; }
+        SearchField {}
+        MiniSlider {}
+        LibraryFilterChip { label: "All"; }
+        SettingsCard {}
+        MenuSheet {}
+    }
+}

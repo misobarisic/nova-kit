@@ -1,0 +1,22 @@
+import { Theme } from "@NovaUiShared";
+
+// Shared bits for 6-button navigation (arrow keys + Enter + Backspace).
+//
+// Pages keep an explicit keyboard focus (zone + index properties) instead of
+// moving real widget focus: grids, custom controls and std widgets then all
+// behave identically, and a single FocusScope per page owns the six keys.
+// `KbMark` is the focus indicator for widget rows. It occupies no space
+// until keyboard mode is active (`active`, set by any arrow/Enter keypress
+// and cleared by mouse clicks), so mouse-only UI is pixel-identical.
+// Cards/rows/chips draw their own accent border (gated on `kb_active` too,
+// see each page).
+export component KbMark inherits Text {
+    in property <bool> on;
+    in property <bool> active: true;
+    text: "▶";
+    font-size: 12px;
+    color: on && active ? Theme.current.focus_ring : transparent;
+    vertical-alignment: center;
+    width: on && active ? 18px : 0px;
+    horizontal-alignment: center;
+}

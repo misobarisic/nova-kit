@@ -1,0 +1,208 @@
+import { Theme } from "@NovaUiShared";
+import { ControlTouchArea } from "control-input.slint";
+
+// Custom single-line search field built directly on TextInput.
+//
+// Why not LineEdit: the stock field paints a persistent "active" look
+// while focused (lighter background + 2px accent underline) plus a bright
+// accent text selection. On touch devices the field keeps focus the whole
+// time the keyboard is up, so it reads as stuck "highlighted/selected"
+// while typing. This field keeps one calm look: same background always,
+// a thin 1px focus ring, and a dimmed selection wash.
+
+import { IcClose, IcSearch } from "icons.slint";
+
+export component SearchField inherits Rectangle {
+    in-out property <string> text: "";
+    in property <string> placeholder-text: "";
+    in property <bool> enabled: true;
+    in property <InputType> input-type: InputType.text;
+    in property <length> text-size: root.prominent ? 16px : 13px;
+    in property <bool> show-pointer-focus: true;
+    in property <bool> keyboard-mode: false;
+    // Touch-sized box (44px) on narrow layouts, compact (32px) otherwise.
+
+    in property <bool> roomy: false;
+    // The Discover search bar is a page-level control rather than a compact
+    // filter; give it the larger height and type scale from the mobile UI.
+    in property <bool> prominent: false;
+    // Optional leading icon, with input/caret space reserved beside it.
+    in property <bool> search-icon: false;
+    in property <image> search-icon-image;
+
+    callback accepted(string);
+    callback edited(string);
+    callback focus_changed(bool);
+    out property <bool> has-focus: inner.has-focus;
+    changed has-focus => { root.focus_changed(self.has-focus); }
+
+    // Focus requests (keyboard edit mode) land on the inner field.
+    forward-focus: inner;
+
+    // Editors opening prefilled text can place an unselected caret at its end.
+    // TextInput handles Unicode offsets and scrolls through its usual callback.
+    public function focus_at_end() {
+        inner.select-all();
+        inner.clear-selection();
+        inner.focus();
+    }
+
+    // What the user sees: committed text plus any still-composing IME
+    // text. On touch keyboards a tap on a submit button does not commit
+    // the composition first, so submitting plain `text` would silently
+    // drop it (empty searches, lost addon URLs). Submit this instead.
+    out property <string> full-text: root.text + inner.preedit-text;
+
+    // Reserve room for the trailing clear button while there is text, so the
+    // caret/text never sits under it.
+    property <bool> has_text: root.full-text != "";
+    property <length> clear_box: root.height;
+    property <length> input_left: root.search-icon ? 44px : (root.prominent ? 16px : 12px);
+    property <length> input_right: root.has_text
+        ? root.clear_box + 4px
+        : (root.prominent ? 16px : 12px);
+
+    height: root.prominent ? 58px : (root.roomy ? 44px : 32px);
+    // Text growth belongs inside the clipped viewport, not in the host's
+    // layout: long URLs/queries must not push nearby controls off-screen.
+    min-width: 1px;
+    preferred-width: 160px;
+    horizontal-stretch: 1;
+    border-radius: root.prominent ? 14px : 6px;
+    border-width: 1px;
+    // Calm 1px ring on focus instead of the stock underline + background
+    // flare that looked permanently "selected" on touch screens.
+    border-color: inner.has-focus && (root.show-pointer-focus || root.keyboard-mode) ? Theme.current.focus_ring : Theme.current.control_border;
+    background: Theme.current.popup;
+    clip: true;
+
+    if root.search-icon && root.search-icon-image.width == 0: search_glyph := IcSearch {
+        x: 14px;
+        y: (parent.height - self.height) / 2;
+        width: 20px;
+        height: 20px;
+        fill: inner.has-focus ? Theme.current.search_icon_focused : Theme.current.search_icon;
+    }
+
+    if root.search-icon && root.search-icon-image.width > 0: Image {
+        x: 14px; y: (parent.height - self.height) / 2;
+        width: 20px; height: 20px;
+        source: root.search-icon-image; image-fit: contain;
+        colorize: Theme.current.accent_soft;
+    }
+
+    if root.search-icon: search_touch := TouchArea {
+        enabled: root.enabled;
+        x: 0px; y: 0px;
+        width: root.input_left;
+        height: root.height;
+        clicked => { inner.focus(); }
+    }
+
+    input_viewport := Rectangle {
+        x: root.input_left;
+        y: 0px;
+        width: Math.max(1px, root.width - root.input_left - root.input_right);
+        height: root.height;
+        clip: true;
+        // Resizing the window (or showing the clear control) changes the
+        // viewport without necessarily moving the cursor. Follow it then too.
+        changed width => { inner.follow_cursor(); }
+
+        inner := TextInput {
+            text <=> root.text;
+            input-type: root.input-type;
+            enabled: root.enabled;
+            font-size: root.text-size;
+            color: Theme.current.text_primary;
+            // Dimmed selection wash instead of the bright stock accent.
+            selection-background-color: Theme.current.input_selection;
+            selection-foreground-color: Theme.current.text_bright;
+            single-line: true;
+            vertical-alignment: center;
+            // Raw TextInput does not scroll its text when the caret leaves
+            // the viewport; track a horizontal offset, as LineEdit does.
+            property <length> computed-x: 0px;
+            property <length> cursor-x: 0px;
+            x: min(0px, max(parent.width - self.width - self.text-cursor-width, self.computed-x));
+            width: max(parent.width - self.text-cursor-width, self.preferred-width);
+            height: parent.height;
+            function follow_cursor() {
+                if (self.cursor-x + self.x < 4px) {
+                    self.computed-x = -self.cursor-x + 4px;
+                } else if (self.cursor-x + self.x > parent.width - 4px - self.text-cursor-width) {
+                    self.computed-x = parent.width - self.cursor-x - 4px - self.text-cursor-width;
+                }
+            }
+            cursor-position-changed(cursor-position) => {
+                self.cursor-x = cursor-position.x;
+                self.follow_cursor();
+            }
+            accepted => { root.accepted(root.full-text); }
+            edited => { root.edited(self.text); }
+        }
+    }
+
+    // Placeholder overlay (raw TextInput has none). Hidden while there
+    // is composing IME text too, otherwise it overlaps the composition.
+    // Plain Text never intercepts pointer events, so taps fall through.
+    if root.full-text == "" && root.placeholder-text != "": placeholder_label := Text {
+        x: root.input_left;
+        y: 0px;
+        width: Math.max(1px, parent.width - root.input_left - root.input_right);
+        height: parent.height;
+        text: root.placeholder-text;
+        color: Theme.current.text_hint;
+        font-size: root.text-size;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    // Clear is shared by every text-entry field, not only Discover. Dispatch
+    // edited explicitly because programmatic writes don't emit TextInput.edited.
+    if root.has_text && root.enabled: clear_button := Rectangle {
+        x: parent.width - root.clear_box;
+        y: 0px;
+        width: root.clear_box;
+        height: parent.height;
+        border-radius: 6px;
+        background: clear_touch.feedback-active ? Theme.current.border_soft : transparent;
+        accessible-role: button;
+        accessible-label: @tr("Clear");
+
+        Rectangle {
+            width: 16px;
+            height: 16px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 8px;
+            background: Theme.current.input_disabled_mark;
+
+            IcClose {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 11px;
+                height: 11px;
+                fill: Theme.current.text_primary;
+            }
+        }
+
+        clear_touch := ControlTouchArea {
+            width: 100%;
+            height: 100%;
+            mouse-cursor: pointer;
+            clicked => {
+                inner.clear-selection();
+                root.text = "";
+                root.edited("");
+                inner.focus();
+            }
+        }
+    }
+
+    states [
+        disabled when !root.enabled : {
+            root.opacity: 0.5;
+        }
+    ]
+}

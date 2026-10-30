@@ -1,0 +1,33 @@
+// Minimal host contract. Nova supplies these through its compiled NovaUiShared library.
+export { Theme, ThemePalette } from "theme.slint";
+export { Anim } from "anim.slint";
+
+export global InterfaceStyle {
+    in-out property <bool> tv: false;
+}
+
+export global SettingsStyle {
+    in-out property <bool> keyboard-mode: false;
+    in-out property <length> focus-y;
+    in-out property <length> focus-height;
+    in-out property <bool> navigation-focus: false;
+    in-out property <int> focus-request: 0;
+
+    public function reveal_control(y: length, height: length, navigation: bool) {
+        self.focus-y = y;
+        self.focus-height = height;
+        self.navigation-focus = navigation;
+        self.focus-request += 1;
+    }
+}
+
+export global ControlInput {
+    in-out property <bool> touch-feedback: false;
+}
+
+export global SliderGesture {
+    in-out property <bool> active: false;
+    in-out property <bool> hovered: false;
+}
+
+export struct SheetItem { label: string, enabled: bool }

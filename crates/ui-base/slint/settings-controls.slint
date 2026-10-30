@@ -1,0 +1,852 @@
+import { InterfaceStyle, Theme, Anim, SettingsStyle } from "@NovaUiShared";
+
+import { ControlTouchArea } from "control-input.slint";
+import { SliderTouchArea } from "slider-touch.slint";
+import { SearchField } from "searchfield.slint";
+import { IcExtension, IcTag, IcImage, IcDisplay, IcPlay, IcChevronLeft, IcChevronRight, IcSettingsGear, IcSync, IcDelete, IcLink } from "icons.slint";
+import { KbMark } from "kbnav.slint";
+
+
+// ---- Shared Settings controls ------------------------
+
+// Purple pill button ("Add", "Save", "Show"…). Primary = filled accent.
+export component PillButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary: false;
+    in property <bool> destructive: false;
+    in property <length> btn_min_width: 0px;
+    // 6-button nav highlight.
+    in property <bool> enabled: true;
+    in property <bool> focused: false;
+    // Finger-sized height on narrow screens (44px touch target).
+    in property <bool> roomy: false;
+    // Narrower side padding (20px instead of 28px): for rows that must fit
+    // more pills than a phone's width allows with the default padding
+    // (Settings → Addons stacks seven controls on two lines). Height, colour
+    // and touch target are unchanged.
+    in property <bool> compact: false;
+    // Opt in for long translated actions in constrained configuration sheets.
+    in property <bool> wrap_label: false;
+    callback clicked();
+    public function focus_control() { key_focus.focus(); }
+    // Expose the label to the accessibility tree (and headless tests, which
+    // locate a specific pill by label rather than by traversal index).
+    accessible-role: button;
+    accessible-label: label;
+    accessible-enabled: root.enabled;
+    width: Math.max(pill_lbl.preferred-width + (root.compact ? 20px : 28px), self.btn_min_width);
+    height: root.wrap_label ? Math.max(InterfaceStyle.tv ? 56px : 44px, pill_lbl.preferred-height + 16px) : InterfaceStyle.tv ? 56px : 44px;
+    border-radius: Math.min(Theme.button_corner_radius, Math.min(self.width, self.height) / 2);
+    property <bool> outlined: Theme.true_black && !root.primary;
+    // Scrollable button rails observe native keyboard focus to reveal the active pill.
+    out property <bool> keyboard_focused: (root.focused || (key_focus.has-focus && SettingsStyle.keyboard-mode)) && root.enabled;
+    border-width: root.keyboard_focused ? 2px : (root.outlined ? 1px : 0px);
+    border-color: root.keyboard_focused ? Theme.current.focus_ring : Theme.current.control_border;
+    background: root.destructive ? (touch.feedback-active ? Theme.current.destructive_control_hover : Theme.current.destructive_control) : touch.feedback-active
+    ? (primary ? Theme.current.accent_hover : Theme.current.settings_control_hover)
+    : (primary ? Theme.current.accent : Theme.current.settings_control);
+    animate background { duration: Anim.hover_fast; }
+
+    pill_lbl := Text {
+        // Match the padding used to size the button above. Reserving 28px
+        // inside a compact button sized with 20px even splits short words.
+        x: root.wrap_label ? (root.compact ? 10px : 14px) : 0px;
+        width: root.wrap_label ? Math.max(1px, root.width - (root.compact ? 20px : 28px)) : root.width;
+        height: root.height;
+        wrap: root.wrap_label ? word-wrap : no-wrap;
+        text: label;
+        font-size: InterfaceStyle.tv ? 20px : 13px;
+        color: root.destructive ? Theme.current.text_destructive : (primary ? Theme.current.on_accent : Theme.current.text_settings);
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    key_focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(e) => {
+            SettingsStyle.keyboard-mode = true;
+            if e.text == Key.Return || e.text == " " { if !InterfaceStyle.tv || !e.repeat { root.clicked(); } accept } else { reject }
+        }
+    }
+    touch := ControlTouchArea {
+        enabled: root.enabled;
+        width: 100%;
+        height: 100%;
+        mouse-cursor: pointer;
+        clicked => { SettingsStyle.keyboard-mode = false; root.clicked(); }
+    }
+    property <bool> focus_visible: root.enabled && SettingsStyle.keyboard-mode && (root.focused || key_focus.has-focus);
+    changed focus_visible => {
+        if (self.focus_visible) {
+            SettingsStyle.reveal_control(root.absolute-position.y, root.height, false);
+        }
+    }
+    forward-focus: key_focus;
+    opacity: root.enabled ? 1 : 0.45;
+
+}
+
+// Toggle switch with a 44px interaction area, matching the
+// buttons so both share the same vertical center in a row.
+export component ToggleSwitch inherits Rectangle {
+    in-out property <bool> checked: false;
+    in property <color> active-thumb-color: Theme.current.toggle_knob_active;
+    // 6-button nav highlight.
+    in property <bool> enabled: true;
+    in property <bool> focused: false;
+    in property <string> name: "";
+    accessible-role: checkbox;
+    accessible-label: root.name;
+    accessible-checkable: true;
+    accessible-checked <=> root.checked;
+    accessible-enabled: root.enabled;
+    callback toggled();
+    width: InterfaceStyle.tv ? 56px : 44px;
+    height: InterfaceStyle.tv ? 56px : 44px;
+    border-width: (focused || (key_focus.has-focus && SettingsStyle.keyboard-mode)) && root.enabled ? 2px : 0px;
+    border-color: Theme.current.focus_ring;
+    border-radius: 6px;
+
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        width: 100%;
+        height: 24px;
+        border-radius: 12px;
+        border-width: 1px;
+        private property <color> target-border-color: root.checked ? Theme.current.accent_soft : Theme.current.border_overlay;
+        private property <color> state-border-color: self.target-border-color;
+        private property <color> target-background: root.checked ? Theme.current.accent_soft : Theme.current.settings_control;
+        private property <color> state-background: self.target-background;
+        private property <bool> state-motion: Anim.enabled;
+        animate state-border-color, state-background { duration: Anim.control_state; easing: ease-out; }
+        changed target-border-color => { self.state-border-color = self.target-border-color; }
+        changed target-background => { self.state-background = self.target-background; }
+        // Reassign with the current duration so master-off cancels an old
+        // animation instead of reviving it when motion is enabled again.
+        changed state-motion => { self.state-border-color = self.target-border-color; self.state-background = self.target-background; }
+        border-color: Anim.enabled ? self.state-border-color : self.target-border-color;
+        background: Anim.enabled ? self.state-background : self.target-background;
+
+        knob := Rectangle {
+            private property <length> target-x: root.checked ? parent.width - self.width - 3px : 3px;
+            private property <length> state-x: self.target-x;
+            private property <color> target-background: root.checked ? root.active-thumb-color : Theme.current.toggle_knob;
+            private property <color> state-background: self.target-background;
+            private property <bool> state-motion: Anim.enabled;
+            animate state-x, state-background { duration: Anim.control_state; easing: ease-out; }
+            changed target-x => { self.state-x = self.target-x; }
+            changed target-background => { self.state-background = self.target-background; }
+            // Reassign with the current duration so master-off cancels an old
+            // animation instead of reviving it when motion is enabled again.
+            changed state-motion => { self.state-x = self.target-x; self.state-background = self.target-background; }
+            x: Anim.enabled ? self.state-x : self.target-x;
+            background: Anim.enabled ? self.state-background : self.target-background;
+            y: (parent.height - self.height) / 2;
+            width: 18px;
+            height: 18px;
+            border-radius: 9px;
+        }
+    }
+
+    key_focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(e) => {
+            SettingsStyle.keyboard-mode = true;
+            if e.text == Key.Return || e.text == " " { if !InterfaceStyle.tv || !e.repeat { root.checked = !root.checked; root.toggled(); } accept } else { reject }
+        }
+    }
+    TouchArea {
+        enabled: root.enabled;
+        width: 100%;
+        height: 100%;
+        mouse-cursor: pointer;
+        clicked => {
+            SettingsStyle.keyboard-mode = false;
+            checked = !checked;
+            toggled();
+        }
+    }
+    property <bool> focus_visible: root.enabled && SettingsStyle.keyboard-mode && (root.focused || key_focus.has-focus);
+    changed focus_visible => {
+        if (self.focus_visible) {
+            SettingsStyle.reveal_control(root.absolute-position.y, root.height, false);
+        }
+    }
+    forward-focus: key_focus;
+    opacity: root.enabled ? 1 : 0.45;
+
+}
+
+// Square icon button for the narrow addon rows (configure / refresh /
+// remove / move): a centered glyph on the pill fill, same hover and keyboard
+// ring language as PillButton. Labels stay on the accessibility tree via
+// `name`, so icon-only buttons keep their translated names.
+export component AddonIconButton inherits Rectangle {
+    in property <string> name: "";
+    in property <bool> destructive: false;
+    // 6-button nav highlight.
+    in property <bool> enabled: true;
+    in property <bool> focused: false;
+    // Finger-sized target on narrow screens (44px, like roomy pills);
+    // 32px elsewhere, exactly matching ToggleSwitch and text pills so a
+    // shared row stays aligned.
+    in property <bool> roomy: false;
+    callback clicked();
+    width: InterfaceStyle.tv ? 56px : 44px;
+    height: InterfaceStyle.tv ? 56px : 44px;
+    border-radius: Math.min(Theme.button_corner_radius, Math.min(self.width, self.height) / 2);
+    border-width: (focused || (key_focus.has-focus && SettingsStyle.keyboard-mode)) && root.enabled ? 2px : 0px;
+    border-color: Theme.current.focus_ring;
+    background: root.destructive ? (touch.feedback-active ? Theme.current.destructive_control_hover : Theme.current.destructive_control) : (touch.feedback-active ? Theme.current.settings_control_hover : Theme.current.settings_control);
+    animate background { duration: Anim.hover_fast; }
+    accessible-role: button;
+    accessible-label: root.name;
+    accessible-enabled: root.enabled;
+    @children
+    key_focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(e) => {
+            SettingsStyle.keyboard-mode = true;
+            if e.text == Key.Return || e.text == " " { if !InterfaceStyle.tv || !e.repeat { root.clicked(); } accept } else { reject }
+        }
+    }
+    touch := ControlTouchArea {
+        enabled: root.enabled;
+        width: 100%;
+        height: 100%;
+        mouse-cursor: pointer;
+        clicked => { SettingsStyle.keyboard-mode = false; root.clicked(); }
+    }
+    property <bool> focus_visible: root.enabled && SettingsStyle.keyboard-mode && (root.focused || key_focus.has-focus);
+    changed focus_visible => {
+        if (self.focus_visible) {
+            SettingsStyle.reveal_control(root.absolute-position.y, root.height, false);
+        }
+    }
+    forward-focus: key_focus;
+    opacity: root.enabled ? 1 : 0.45;
+
+}
+
+// Addon identity and actions share the same card on phones and desktop.
+// Keyboard columns retain their existing action indices.
+export component AddonRowCard inherits Rectangle {
+    in property <string> title;
+    in property <string> caption;
+    in property <image> logo;
+    in property <string> initial;
+    in property <bool> tinted;
+    in property <bool> on;
+    in property <bool> refreshing;
+    private property <bool> refresh_motion: root.refreshing && Anim.enabled && Anim.transitions && Anim.hover;
+    out property <angle> refresh_rotation: root.refresh_motion ? Math.mod(animation-tick(), 900ms) / 900ms * 360deg : 0deg;
+    in property <bool> has_config;
+    in property <bool> kb_focused_row;
+    in property <bool> kb_active;
+    in property <int> kb_col: -1;
+    callback toggled(bool);
+    callback configure();
+    callback copy_link();
+    callback refresh();
+    callback remove();
+    callback move_up();
+    callback move_down();
+    min-width: 0px;
+    background: Theme.current.card;
+    border-radius: 16px;
+    border-width: 1px;
+    border-color: Theme.current.border_card;
+    VerticalLayout {
+        padding: 12px;
+        spacing: 10px;
+        HorizontalLayout {
+            spacing: 10px;
+            Rectangle {
+                width: 48px; height: 48px; horizontal-stretch: 0;
+                background: Theme.current.selection_wash;
+                border-radius: 12px;
+                clip: true;
+                if root.logo.width > 0: Image {
+                    source: root.logo; width: 100%; height: 100%; image-fit: contain;
+                }
+                if root.logo.width == 0: Text {
+                    text: root.initial; font-size: 24px; font-weight: 700;
+                    color: Theme.current.accent_soft;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+            }
+            VerticalLayout {
+                min-width: 0px; horizontal-stretch: 1; spacing: 4px; alignment: center;
+                Text { text: root.title; font-size: InterfaceStyle.tv ? 22px : 16px; font-weight: 600; color: Theme.current.text_bright; wrap: word-wrap; min-width: 0px; }
+                if root.caption != "": Text { text: root.caption; color: Theme.current.text_secondary; font-size: InterfaceStyle.tv ? 18px : 12px; wrap: word-wrap; min-width: 0px; }
+            }
+            Rectangle {
+                width: 44px; height: 48px;
+                ToggleSwitch { y: (parent.height - self.height)/2; checked: root.on; focused: root.kb_active && root.kb_focused_row && root.kb_col == 0; toggled => { root.toggled(self.checked); } }
+            }
+        }
+        HorizontalLayout {
+            spacing: 8px; alignment: end;
+            if root.has_config: AddonIconButton {
+                name: @tr("Configure"); focused: root.kb_active && root.kb_focused_row && root.kb_col == 1;
+                clicked => { root.configure(); }
+                Image {
+                    x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                    width: 24px; height: 24px; image-fit: contain;
+                    source: @image-url("../assets/icons/addons/settings.svg");
+                    colorize: Theme.current.text_settings;
+                }
+            }
+            AddonIconButton {
+                name: root.refreshing ? @tr("Refreshing…") : @tr("Refresh"); enabled: !root.refreshing; focused: root.kb_active && root.kb_focused_row && root.kb_col == 3;
+                clicked => { if !root.refreshing { root.refresh(); } }
+                Image {
+                    x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                    width: 24px; height: 24px; image-fit: contain;
+                    source: @image-url("../assets/icons/addons/refresh-cw.svg");
+                    transform-rotation: root.refresh_rotation;
+                    colorize: Theme.current.text_settings;
+                }
+            }
+            AddonIconButton {
+                name: @tr("Move up"); focused: root.kb_active && root.kb_focused_row && root.kb_col == 5;
+                clicked => { root.move_up(); }
+                Image {
+                    x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                    width: 24px; height: 24px; image-fit: contain;
+                    source: @image-url("../assets/icons/addons/arrow-up.svg");
+                    colorize: Theme.current.text_settings;
+                }
+            }
+            AddonIconButton {
+                name: @tr("Move down"); focused: root.kb_active && root.kb_focused_row && root.kb_col == 6;
+                clicked => { root.move_down(); }
+                Image {
+                    x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                    width: 24px; height: 24px; image-fit: contain;
+                    source: @image-url("../assets/icons/addons/arrow-down.svg");
+                    colorize: Theme.current.text_settings;
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            addon_copy := Rectangle {
+                horizontal-stretch: 1; min-width: 0px; height: InterfaceStyle.tv ? 56px : 44px;
+                border-radius: 12px; border-width: 1px;
+                border-color: root.kb_active && root.kb_focused_row && root.kb_col == 2 ? Theme.current.focus_ring : Theme.current.border_overlay;
+                background: copy_touch.feedback-active ? Theme.current.settings_control_hover : Theme.current.settings_control;
+                accessible-role: button; accessible-label: @tr("Copy link");
+                forward-focus: copy_focus;
+                IcLink { x:12px; y:12px; width:20px; height:20px; fill:Theme.current.accent_soft; }
+                Text { x:42px; width:Math.max(0px,parent.width - 66px); height:100%; text:@tr("Copy link"); color:Theme.current.text_bright; font-size:13px; vertical-alignment:center; overflow:elide; }
+                IcChevronRight { x:parent.width - 26px; y:13px; width:18px; height:18px; fill:Theme.current.text_secondary; }
+                copy_focus := FocusScope { key-pressed(e) => { if e.text == Key.Return || e.text == " " {root.copy_link();accept} else {reject} } }
+                copy_touch := ControlTouchArea { mouse-cursor:pointer; clicked => {copy_focus.focus();root.copy_link();} }
+            }
+            AddonIconButton {
+                name:@tr("Remove"); destructive:true; focused: root.kb_active && root.kb_focused_row && root.kb_col == 4;
+                clicked => {root.remove();}
+                IcDelete {x:11px;y:11px;width:22px;height:22px;fill:Theme.current.text_destructive;}
+            }
+        }
+    }
+}
+
+// Slider with a 44px interaction area and restrained accent.
+export component MiniSlider inherits Rectangle {
+    in-out property <float> value: 0.0;
+    in property <float> minimum: 0.0;
+    in property <float> maximum: 100.0;
+    in property <float> step: 1.0;
+    // 6-button nav highlight (Left/Right adjusts when focused).
+    in property <bool> enabled: true;
+    in property <bool> focused: false;
+    in property <string> name;
+    in property <bool> allow-vertical-pan: false;
+    accessible-role: slider;
+    accessible-label: root.name;
+    accessible-enabled: root.enabled;
+    accessible-value: root.value;
+    accessible-value-minimum: root.minimum;
+    accessible-value-maximum: root.maximum;
+    accessible-value-step: root.step;
+    accessible-action-set-value(v) => { if root.enabled && v.is-float() { root.adjust(v.to-float()); } }
+    accessible-action-increment => { if root.enabled { root.adjust(root.value + root.step); } }
+    accessible-action-decrement => { if root.enabled { root.adjust(root.value - root.step); } }
+    function adjust(v: float) { root.value = Math.clamp(v, root.minimum, root.maximum); root.changed(root.value); }
+    callback changed(float);
+    height: InterfaceStyle.tv ? 56px : 44px;
+    border-width: (focused || (key_focus.has-focus && SettingsStyle.keyboard-mode)) && root.enabled ? 2px : 0px;
+    border-color: Theme.current.focus_ring;
+    border-radius: 6px;
+
+    property <float> span: Math.max(maximum - minimum, 0.001);
+    property <float> pct: Math.clamp((value - minimum) / span, 0, 1);
+
+    Rectangle {
+        x: 0;
+        width: 100%;
+        y: (parent.height - 4px) / 2;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.current.slider_track;
+
+        Rectangle {
+            x: 0;
+            width: root.pct * parent.width;
+            height: 100%;
+            border-radius: 2px;
+            background: Theme.current.accent_soft;
+        }
+    }
+
+    Rectangle {
+        x: root.pct * (parent.width - 14px);
+        y: (parent.height - 14px) / 2;
+        width: 14px;
+        height: 14px;
+        border-radius: 7px;
+        background: Theme.current.accent_soft;
+    }
+
+    key_focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(e) => {
+            SettingsStyle.keyboard-mode = true;
+            if e.text == Key.LeftArrow || e.text == Key.RightArrow { root.value = Math.clamp(root.value + (e.text == Key.RightArrow ? root.step : -root.step), root.minimum, root.maximum); root.changed(root.value); accept } else { reject }
+        }
+    }
+    slider_touch := SliderTouchArea {
+        allow-vertical-pan: root.allow-vertical-pan;
+        enabled: root.enabled;
+        width: 100%;
+        height: 100%;
+        mouse-cursor: pointer;
+        moved => {
+            if (!self.pressed || !self.adjusting) { return; }
+            SettingsStyle.keyboard-mode = false;
+            value = minimum + Math.clamp(self.mouse-x / self.width, 0, 1) * span;
+            value = Math.round(value / root.step) * root.step;
+            root.changed(value);
+        }
+        clicked => {
+            if self.vertical-pan { return; }
+            SettingsStyle.keyboard-mode = false;
+            value = minimum + Math.clamp(self.mouse-x / self.width, 0, 1) * span;
+            value = Math.round(value / root.step) * root.step;
+            root.changed(value);
+        }
+    }
+    property <bool> focus_visible: root.enabled && SettingsStyle.keyboard-mode && (root.focused || key_focus.has-focus);
+    changed focus_visible => {
+        if (self.focus_visible) {
+            SettingsStyle.reveal_control(root.absolute-position.y, root.height, false);
+        }
+    }
+    forward-focus: key_focus;
+    opacity: root.enabled ? 1 : 0.45;
+
+}
+
+// Segmented option picker (e.g. JPEG | WebP).
+export component Segmented inherits HorizontalLayout {
+    in property <[string]> labels;
+    // Keep unsupported choices visible without allowing pointer, keyboard or
+    // accessibility activation. The owning page also skips them when stepping.
+    in property <int> disabled_index: -1;
+    // The owning page updates the selection in picked(). Writing a mapped
+    // index here would destroy its binding and strand selections in split rows.
+    in property <int> current_index: 0;
+    // 6-button nav highlight (Left/Right cycles when focused).
+    in property <bool> enabled: true;
+    in property <bool> focused: false;
+    callback picked(int);
+    spacing: 8px;
+
+    for opt[i] in labels: Rectangle {
+        accessible-role: button;
+        accessible-label: opt;
+        accessible-enabled: root.enabled && i != root.disabled_index;
+        accessible-checkable: true;
+        accessible-checked: root.current_index == i;
+        width: seg_lbl.preferred-width + 28px;
+        height: InterfaceStyle.tv ? 56px : 44px;
+        border-radius: Math.min(Theme.button_corner_radius, Math.min(self.width, self.height) / 2);
+        border-width: self.focus_visible ? 2px : (Theme.true_black ? 1px : 0px);
+        border-color: self.focus_visible ? Theme.current.focus_ring : Theme.current.control_border;
+        private property <color> target-background: root.current_index == i ? Theme.current.selection_fill : transparent;
+        private property <color> state-background: self.target-background;
+        private property <bool> state-motion: Anim.enabled;
+        animate state-background { duration: Anim.control_state; easing: ease-out; }
+        changed target-background => { self.state-background = self.target-background; }
+        // Reassign with the current duration so master-off cancels an old
+        // animation instead of reviving it when motion is enabled again.
+        changed state-motion => { self.state-background = self.target-background; }
+        background: Anim.enabled ? self.state-background : self.target-background;
+        opacity: root.enabled && i != root.disabled_index ? 1 : 0.45;
+
+        seg_lbl := Text {
+            text: opt;
+            font-size: InterfaceStyle.tv ? 20px : 13px;
+            private property <color> target-color: root.current_index == i ? Theme.current.text_selected : Theme.current.text_settings;
+            private property <color> state-color: self.target-color;
+            private property <bool> state-motion: Anim.enabled;
+            animate state-color { duration: Anim.control_state; easing: ease-out; }
+            changed target-color => { self.state-color = self.target-color; }
+            // Reassign with the current duration so master-off cancels an old
+            // animation instead of reviving it when motion is enabled again.
+            changed state-motion => { self.state-color = self.target-color; }
+            color: Anim.enabled ? self.state-color : self.target-color;
+            vertical-alignment: center;
+        }
+
+        property <bool> focus_visible: root.enabled && i != root.disabled_index && SettingsStyle.keyboard-mode && ((root.focused && root.current_index == i) || segment_focus.has-focus);
+        changed focus_visible => {
+            if (self.focus_visible) {
+                SettingsStyle.reveal_control(self.absolute-position.y, self.height, false);
+            }
+        }
+        forward-focus: segment_focus;
+        segment_focus := FocusScope {
+            enabled: root.enabled && i != root.disabled_index;
+            key-pressed(e) => {
+                SettingsStyle.keyboard-mode = true;
+                if e.text == Key.Return || e.text == " " { root.picked(i); accept } else { reject }
+            }
+        }
+        TouchArea {
+            enabled: root.enabled && i != root.disabled_index;
+            width: 100%;
+            height: 100%;
+            mouse-cursor: pointer;
+            clicked => {
+                SettingsStyle.keyboard-mode = false;
+                root.picked(i);
+            }
+        }
+    }
+}
+
+// Section title: purple icon + uppercase label.
+export component SectionHeader inherits HorizontalLayout {
+    in property <int> icon-kind: 0;   // 1 addons, 2 categories, 3 cache, 4 display, 5 player, 6 settings, 7 sync
+    in property <string> label;
+    spacing: 10px;
+    alignment: start;
+
+    Rectangle {
+        width: 26px;
+        height: 26px;
+
+        if icon-kind == 1: IcExtension {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 20px;
+            height: 20px;
+            fill: Theme.current.accent_soft;
+        }
+        if icon-kind == 2: IcTag {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 20px;
+            height: 20px;
+            fill: Theme.current.accent_soft;
+        }
+        if icon-kind == 3: IcImage {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 20px;
+            height: 20px;
+            fill: Theme.current.accent_soft;
+        }
+        if icon-kind == 4: IcDisplay {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 20px;
+            height: 20px;
+            fill: Theme.current.accent_soft;
+        }
+        if icon-kind == 5: IcPlay {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 20px;
+            height: 20px;
+            fill: Theme.current.accent_soft;
+        }
+        if icon-kind == 6: IcSettingsGear {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 20px;
+            height: 20px;
+            fill: Theme.current.accent_soft;
+        }
+        if icon-kind == 7: IcSync {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 20px;
+            height: 20px;
+            fill: Theme.current.accent_soft;
+        }
+        if icon-kind == 8: IcImage {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 20px;
+            height: 20px;
+            fill: Theme.current.accent_soft;
+        }
+    }
+
+    Text {
+        text: label;
+        font-size: InterfaceStyle.tv ? 22px : 16px;
+        font-weight: 600;
+        letter-spacing: 0px;
+        color: Theme.current.text_settings;
+        vertical-alignment: center;
+    }
+}
+
+// Bordered value readout shown under sliders.
+export component ValueBox inherits Rectangle {
+    in property <string> text;
+    width: 120px;
+    height: InterfaceStyle.tv ? 44px : 30px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.current.border_overlay;
+    background: Theme.current.card;
+
+    Text {
+        text: text;
+        font-size: InterfaceStyle.tv ? 20px : 13px;
+        color: Theme.current.text_bright;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
+}
+
+// Landing-page entry: icon + title + subtitle + chevron. Tapping opens the
+// corresponding settings subpage (see `open_page`).
+export component SettingsLink inherits Rectangle {
+    in property <int> icon-kind: 0;   // 0 addons, 1 categories, 2 cache, 3 display, 4 torrents, 5 player, 6 look-and-feel, 7 sync; 16 calendar, 17 downloads
+    // Settings IDs keep their existing meaning; More supplies explicit icons.
+    in property <image> icon:
+        root.icon-kind == 0 ? @image-url("../assets/icons/menus/addons.svg") :
+        root.icon-kind == 1 || root.icon-kind == 11 ? @image-url("../assets/icons/menus/categories.svg") :
+        root.icon-kind == 2 ? @image-url("../assets/icons/menus/image-cache.svg") :
+        root.icon-kind == 3 ? @image-url("../assets/icons/menus/display.svg") :
+        root.icon-kind == 4 ? @image-url("../assets/icons/menus/storage.svg") :
+        root.icon-kind == 5 ? @image-url("../assets/icons/menus/player.svg") :
+        root.icon-kind == 6 ? @image-url("../assets/icons/menus/look-and-feel.svg") :
+        root.icon-kind == 7 ? @image-url("../assets/icons/menus/sync.svg") :
+        root.icon-kind == 8 ? @image-url("../assets/icons/menus/downloads-storage.svg") :
+        root.icon-kind == 9 || root.icon-kind == 17 ? @image-url("../assets/icons/menus/download.svg") :
+        root.icon-kind == 10 ? @image-url("../assets/icons/menus/settings.svg") :
+        root.icon-kind == 12 ? @image-url("../assets/icons/menus/tracking.svg") :
+        root.icon-kind == 13 ? @image-url("../assets/icons/menus/home.svg") :
+        root.icon-kind == 14 ? @image-url("../assets/icons/menus/theme.svg") :
+        root.icon-kind == 15 ? @image-url("../assets/icons/menus/about.svg") :
+        root.icon-kind == 16 ? @image-url("../assets/icons/menus/calendar.svg") : root.no-icon;
+    private property <image> no-icon;
+    in property <string> destination-id: "";
+    in property <bool> selected: false;
+    in property <string> title: "";
+    in property <string> subtitle: "";
+    in property <bool> enabled: true;
+    in property <bool> focused: false;
+    // False while a subpage is open: blocks taps that would fall through the
+    // subpage layer (Slint hit-tests TouchAreas regardless of z-order).
+    in property <bool> interactive: true;
+    callback picked();
+
+    accessible-role: button;
+    accessible-id: root.destination-id;
+    accessible-label: root.title;
+    accessible-description: root.subtitle;
+    height: Math.max(72px, 28px + link_measure.preferred-height);
+    Rectangle {
+        height: 0px; clip: true;
+        link_measure := VerticalLayout {
+            width: Math.max(0px, root.width - 128px); spacing: 2px;
+            Text { text: root.title; font-size: InterfaceStyle.tv ? 22px : 16px; font-weight: 600; wrap: word-wrap; min-width: 0px; }
+            if root.subtitle != "": Text { text: root.subtitle; font-size: InterfaceStyle.tv ? 20px : 14px; wrap: word-wrap; min-width: 0px; }
+        }
+    }
+    border-radius: 8px;
+    border-width: SettingsStyle.keyboard-mode && (root.focused || link_focus.has-focus) ? 2px : 0px;
+    border-color: Theme.current.focus_ring;
+    background: root.selected ? Theme.current.settings_selected_wash : (touch.feedback-active && interactive ? Theme.current.settings_control : Theme.current.card);
+    animate background { duration: Anim.hover_fast; }
+
+    HorizontalLayout {
+        width: 100%; height: 100%;
+        cross-axis-alignment: center;
+        padding-top: 14px;
+        padding-bottom: 14px;
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 14px;
+
+        Rectangle {
+            width: 34px;
+            height: 34px;
+
+            if root.icon.width > 0: Image {
+                source: root.icon;
+                colorize: Theme.current.accent_soft;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 24px; height: 24px;
+                image-fit: contain;
+            }
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            min-width: 0px;
+            alignment: center;
+            spacing: 2px;
+
+            Text {
+                text: root.title;
+                font-size: InterfaceStyle.tv ? 22px : 16px;
+                font-weight: 600;
+                color: Theme.current.text_bright;
+                wrap: word-wrap;
+                min-width: 0px;
+            }
+
+            if root.subtitle != "": Text {
+                text: root.subtitle;
+                font-size: InterfaceStyle.tv ? 20px : 14px;
+                color: Theme.current.text_settings;
+                wrap: word-wrap;
+                min-width: 0px;
+            }
+        }
+
+        Rectangle {
+            width: 34px;
+            height: 34px;
+
+            IcChevronRight {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 18px;
+                height: 18px;
+                fill: Theme.current.settings_icon_muted;
+            }
+        }
+    }
+
+    forward-focus: link_focus;
+    property <bool> focus_visible: root.interactive && SettingsStyle.keyboard-mode && (root.focused || link_focus.has-focus);
+    changed focus_visible => {
+        if (self.focus_visible) {
+            SettingsStyle.reveal_control(root.absolute-position.y, root.height, true);
+        }
+    }
+    link_focus := FocusScope {
+        enabled: root.interactive;
+        key-pressed(e) => {
+            SettingsStyle.keyboard-mode = true;
+            if (e.text == Key.Return || e.text == " ") { root.picked(); accept } else { reject }
+        }
+    }
+    touch := ControlTouchArea {
+        enabled: root.interactive;
+        width: 100%;
+        height: 100%;
+        mouse-cursor: pointer;
+        clicked => { SettingsStyle.keyboard-mode = false; root.picked(); }
+    }
+}
+
+
+
+export component SettingsCard inherits Rectangle {
+    background: Theme.current.card; border-radius: Theme.card_corner_radius; border-width: 1px; border-color: Theme.current.border_soft;
+    vertical-stretch: 0; clip: true;
+    VerticalLayout { spacing: 0px; @children }
+}
+
+
+
+// The same 44px chevron target is used on pages opened from Settings and More.
+export component SettingsBackButton inherits Rectangle {
+    in property <bool> focused: false;
+    in property <bool> reveal-on-focus: true;
+    callback clicked();
+    width: InterfaceStyle.tv ? 56px : 44px;
+    height: InterfaceStyle.tv ? 56px : 44px;
+    border-radius: 22px;
+    background: back_touch.feedback-active ? Theme.current.settings_control_hover : Theme.current.settings_control;
+    border-width: root.focused || (back_focus.has-focus && SettingsStyle.keyboard-mode) ? 2px : 0px;
+    border-color: Theme.current.focus_ring;
+    accessible-role: button;
+    accessible-label: @tr("Back");
+    forward-focus: back_focus;
+    IcChevronLeft { width: 20px; height: 20px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; fill: Theme.current.text_settings; }
+    back_focus := FocusScope {
+        key-pressed(e) => {
+            SettingsStyle.keyboard-mode = true;
+            if e.text == Key.Return || e.text == " " { if !InterfaceStyle.tv || !e.repeat { root.clicked(); } accept } else { reject }
+        }
+    }
+    back_touch := ControlTouchArea {
+        width: 100%; height: 100%; mouse-cursor: pointer;
+        clicked => { SettingsStyle.keyboard-mode = false; back_focus.focus(); root.clicked(); }
+    }
+    property <bool> focus_visible: SettingsStyle.keyboard-mode && (root.focused || back_focus.has-focus);
+    changed focus_visible => {
+        if (self.focus_visible && root.reveal-on-focus) {
+            SettingsStyle.reveal_control(root.absolute-position.y, root.height, false);
+        }
+    }
+}
+
+// Header captions and controls; SettingsPage owns the edge-to-edge artwork.
+export component SettingsHeader inherits Rectangle {
+    in property <string> title;
+    in property <string> introduction;
+    in property <bool> overview: false;
+    in property <bool> show-back: !root.overview;
+    in property <bool> back_focused: false;
+    callback back();
+    vertical-stretch: 0;
+    height: Math.max(108px, heading_measure.preferred-height + intro_measure.preferred-height + 48px);
+    clip: true;
+    Rectangle {
+        height: 0px; clip: true;
+        heading_measure := Text { width: Math.max(0px, root.width - (root.show-back ? 88px : 32px)); text: root.title; font-size: root.overview ? 32px : 24px; font-weight: 700; wrap: word-wrap; }
+        intro_measure := Text { width: Math.max(0px, root.width - 32px); text: root.introduction; font-size: InterfaceStyle.tv ? 20px : 14px; wrap: word-wrap; }
+    }
+    VerticalLayout {
+        padding: 16px; spacing: 8px;
+        HorizontalLayout {
+            spacing: 12px;
+            if root.show-back: SettingsBackButton { focused: root.back_focused; clicked => { root.back(); } }
+            Text { text: root.title; font-size: root.overview ? 32px : 24px; font-weight: 700; color: Theme.current.text_bright; wrap: word-wrap; min-width: 0px; vertical-alignment: center; }
+        }
+        Text { text: root.introduction; font-size: InterfaceStyle.tv ? 20px : 14px; color: Theme.current.text_settings; wrap: word-wrap; min-width: 0px; }
+    }
+}
+
+// Account editors use the same caret/IME handling without a pointer focus ring.
+export component SettingsInput inherits SearchField {
+    roomy: true;
+    show-pointer-focus: false;
+    keyboard-mode: SettingsStyle.keyboard-mode;
+    background: Theme.current.settings_control;
+    property <bool> focus-visible: root.has-focus && SettingsStyle.keyboard-mode;
+    changed focus-visible => {
+        if (self.focus-visible) {
+            SettingsStyle.reveal_control(root.absolute-position.y, root.height, false);
+        }
+    }
+    accessible-role: text-input;
+    accessible-label: root.placeholder-text;
+    accessible-value <=> root.text;
+    accessible-action-set-value(v) => { root.text = v; root.edited(v); }
+}

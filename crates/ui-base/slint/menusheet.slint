@@ -1,0 +1,318 @@
+import { Theme, SheetItem, Anim, InterfaceStyle, SettingsStyle } from "@NovaUiShared";
+
+import { ScrollView } from "scrollview.slint";
+
+
+
+// Bottom-sheet action menu replacing native context menus on cards.
+//
+// Why not ContextMenuArea: its presses are consumed by overlapping card
+// TouchAreas (upstream slint#12354), its hold timers can't be coordinated
+// across cards, and a native popup can't swallow the outside-tap that
+// dismisses it (the tap falls through to the card underneath). This
+// sheet is a single app-controlled instance per page: the dim backdrop
+// eats outside taps (close only, never forwarded) and the panel holds
+// the actions. Same component serves mouse right-click, touch hold and
+// keyboard flows — the caller opens it explicitly.
+//
+// Sizing: the panel is fully arithmetic (title + N*48px rows + Cancel),
+// capped at ~85% of the viewport with the action list scrolling inside,
+// and lifted by `safe-bottom` so Cancel clears the Android system bar.
+// Short sheets render exactly; tall/landscape sheets cap and scroll.
+export component MenuSheet inherits Rectangle {
+    // Keep the component mounted: `open` controls interaction immediately,
+    // while the retained layer finishes its exit before disappearing.
+    in property <bool> open: false;
+    in property <bool> keyboard_navigation: InterfaceStyle.tv;
+    in property <string> sheet_title: "";
+    in property <[SheetItem]> items: [];
+    // Opt in to a single-choice menu. Action sheets keep their existing rows.
+    in property <int> selected_index: -1;
+    // Bottom system-bar inset (Android gesture/nav bar), bound by the
+    // page like `safe-top`. 0 on desktop/web.
+    in property <length> safe-bottom: 0px;
+    // Side insets: in landscape the display cutout / gesture area moves to
+    // the left or right edge, so the sheet clears it too.
+    in property <length> safe-left: 0px;
+    in property <length> safe-right: 0px;
+    // Viewport-relative panel cap, bound by the page (e.g. 85% of the
+    // page height). Passed in rather than derived from our own height:
+    // a ScrollView with an explicit height inside would otherwise close
+    // a layout binding loop. The page height is window-driven, so this
+    // stays one-way.
+    in property <length> max_h: 600px;
+
+    callback picked(int);
+    callback closed();
+
+    width: 100%;
+    height: 100%;
+    visible: root.open || root.retained;
+    clip: true;
+
+    private property <bool> retained: false;
+    private property <bool> revealed: false;
+    private property <bool> motion_enabled: Anim.enabled && Anim.transitions;
+
+    function update_open() {
+        enter_t.stop();
+        exit_t.stop();
+        if (root.open) {
+            root.retained = true;
+            if root.keyboard_navigation { root.tv-index = root.items.length; menu_scope.focus(); }
+            if (root.motion_enabled) {
+                // Defer the first target until the hidden baseline is painted.
+                enter_t.start();
+            } else {
+                root.revealed = true;
+            }
+        } else {
+            root.revealed = false;
+            if (root.motion_enabled && root.retained) {
+                exit_t.start();
+            } else {
+                root.retained = false;
+            }
+        }
+    }
+
+    init => { root.update_open(); }
+    changed open => { root.update_open(); }
+    changed motion_enabled => {
+        if (!root.motion_enabled) {
+            enter_t.stop();
+            exit_t.stop();
+            root.revealed = root.open;
+            root.retained = root.open;
+        }
+    }
+
+    enter_t := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => { self.stop(); root.revealed = root.open; }
+    }
+    exit_t := Timer {
+        interval: Anim.transition_slide;
+        running: false;
+        triggered => { self.stop(); root.retained = false; }
+    }
+
+    // TV remotes own the sheet until an action or Back closes it. Cancel is
+    // the safe initial selection; disabled actions can never be invoked.
+    property <int> tv-index: 0;
+    menu_scope := FocusScope {
+        enabled: root.keyboard_navigation && root.open;
+        key-pressed(e) => {
+            if !root.keyboard_navigation || !root.open { reject }
+            else if e.text == Key.UpArrow || e.text == Key.DownArrow || e.text == Key.Tab {
+                SettingsStyle.keyboard-mode = true;
+                root.tv-index = Math.clamp(root.tv-index + (e.text == Key.UpArrow || (e.text == Key.Tab && e.modifiers.shift) ? -1 : 1), 0, root.items.length);
+                menu_scroll.content-y = -Math.max(0px, (root.tv-index + 1) * (InterfaceStyle.tv ? 68px : 52px) - menu_scroll.visible-height);
+                accept
+            } else if e.text == Key.Return || e.text == " " {
+                if !e.repeat {
+                    if root.tv-index == root.items.length { root.closed(); }
+                    else if root.items[root.tv-index].enabled { root.picked(root.tv-index); }
+                }
+                accept
+            } else if e.text == Key.Back || e.text == Key.Escape {
+                if !e.repeat { root.closed(); } accept
+            } else { reject }
+        }
+    }
+
+    // Chrome around the scrolling list: padding + gaps + optional title
+    // + Cancel. Kept explicit (not measured) so the cap math below is
+    // exact and short sheets never reserve empty space.
+    property <length> chrome_h: 24px + (root.sheet_title == "" ? 0px : InterfaceStyle.tv ? 36px : 28px) + (InterfaceStyle.tv ? 64px : 48px);
+    // Visible list height: everything when it fits, floored at 0.
+    property <length> list_h: Math.max(0px, Math.min(root.items.length * (InterfaceStyle.tv ? 68px : 52px) - 4px, root.max_h - root.chrome_h - root.safe-bottom));
+
+    // Dim backdrop: covers the page, eats outside taps (close only).
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: Theme.current.scrim_shadow;
+        opacity: root.revealed ? 1.0 : 0.0;
+        animate opacity { duration: Anim.transition_fade; easing: ease-out; }
+    }
+
+    back_touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: pointer;
+        // Continue swallowing outside taps during exit, but dispatch once.
+        clicked => { if (root.open) { root.closed(); } }
+    }
+
+    // Bottom-anchored panel (large touch targets, thumb-friendly),
+    // centered with side margins and capped width on wide screens.
+    VerticalLayout {
+        width: 100%;
+        height: 100%;
+        y: root.revealed ? 0px : root.chrome_h + root.list_h + root.safe-bottom;
+        animate y { duration: Anim.transition_slide; easing: ease-out; }
+        alignment: end;
+
+        HorizontalLayout {
+            width: 100%;
+            alignment: center;
+            padding-left: root.safe-left;
+            padding-right: root.safe-right;
+
+            panel := Rectangle {
+                width: Math.min(InterfaceStyle.tv ? 720px : 560px, parent.width - root.safe-left - root.safe-right - 24px);
+                height: root.chrome_h + root.list_h + root.safe-bottom;
+                background: Theme.current.popup;
+                border-radius: 16px;
+                clip: true;
+
+                VerticalLayout {
+                    width: 100%;
+                    height: 100%;
+                    padding: 8px;
+                    spacing: 4px;
+                    // Pack from the top: title, items, Cancel in order.
+                    // Any slack (rounding, overshoot) pools below Cancel
+                    // inside the bottom lift — never between the title
+                    // and the first item.
+                    alignment: start;
+
+                    if root.sheet_title != "": Text {
+                        text: root.sheet_title;
+                        color: Theme.current.text_muted;
+                        font-size: InterfaceStyle.tv ? 18px : 12px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                    }
+
+                    menu_scroll := ScrollView {
+                        width: 100%;
+                        height: root.list_h;
+                        vertical-stretch: 0;
+                        // Touch drag-scroll for capped lists (same opt-in
+                        // as every other ScrollView in the app).
+                        mouse-drag-pan-enabled: true;
+
+                        VerticalLayout {
+                            width: 100%;
+                            spacing: 4px;
+
+                            for it[i] in root.items: menu_row := Rectangle {
+                                property <bool> state-motion: Anim.enabled;
+                                property <float> selected-target: root.selected_index == i ? 1 : 0;
+                                property <float> animated-selection: self.selected-target;
+                                property <color> ring-target: root.selected_index == i ? Theme.current.accent : Theme.current.text_muted;
+                                property <color> animated-ring: self.ring-target;
+                                animate animated-selection, animated-ring { duration: Anim.control_state; easing: ease-out; }
+                                changed selected-target => { self.animated-selection = self.selected-target; }
+                                changed ring-target => { self.animated-ring = self.ring-target; }
+                                // Zero duration alone does not stop a running
+                                // animation. Retarget while disabled as well as
+                                // bypassing it, so re-enabling cannot jump back.
+                                changed state-motion => {
+                                    if !self.state-motion {
+                                        self.animated-selection = self.selected-target;
+                                        self.animated-ring = self.ring-target;
+                                    }
+                                }
+                                height: InterfaceStyle.tv ? 64px : 48px;
+                                border-radius: 8px;
+                                border-width: root.keyboard_navigation && (InterfaceStyle.tv || SettingsStyle.keyboard-mode) && root.tv-index == i ? 2px : 0px;
+                                border-color: Theme.current.focus_ring;
+                                background: btn_touch.has-hover ? Theme.current.control_hover : transparent;
+                                // Retain the wash and dot so checked-state
+                                // changes can fade in both directions. The
+                                // focus outline and semantic value stay instant.
+                                if root.selected_index >= 0: Rectangle {
+                                    x: 2px; y: 2px;
+                                    width: parent.width - 4px; height: parent.height - 4px;
+                                    border-radius: 6px;
+                                    background: Theme.current.settings_selected_wash;
+                                    opacity: Anim.enabled ? menu_row.animated-selection : menu_row.selected-target;
+                                }
+                                // Slint requires static accessibility roles.
+                                // Exactly one full-row semantic item exposes
+                                // the shared visual and pointer target below.
+                                if root.selected_index < 0: Rectangle {
+                                    width: 100%; height: 100%;
+                                    accessible-role: button;
+                                    accessible-label: it.label;
+                                    accessible-enabled: it.enabled;
+                                }
+                                if root.selected_index >= 0: Rectangle {
+                                    width: 100%; height: 100%;
+                                    accessible-role: radio-button;
+                                    accessible-label: it.label;
+                                    accessible-enabled: it.enabled;
+                                    accessible-checkable: true;
+                                    accessible-checked: root.selected_index == i;
+                                }
+
+                                if root.selected_index >= 0: Rectangle {
+                                    x: 16px;
+                                    y: (parent.height - self.height) / 2;
+                                    width: InterfaceStyle.tv ? 22px : 18px;
+                                    height: self.width;
+                                    border-radius: self.width / 2;
+                                    border-width: 2px;
+                                    border-color: Anim.enabled ? menu_row.animated-ring : menu_row.ring-target;
+                                    Rectangle {
+                                        width: parent.width / 2;
+                                        height: self.width;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        border-radius: self.width / 2;
+                                        background: Theme.current.accent;
+                                        opacity: Anim.enabled ? menu_row.animated-selection : menu_row.selected-target;
+                                    }
+                                }
+
+                                Text {
+                                    x: root.selected_index >= 0 ? 48px : 0px;
+                                    width: parent.width - self.x - (root.selected_index >= 0 ? 16px : 0px);
+                                    text: it.label;
+                                    color: it.enabled ? Theme.current.text_primary : Theme.current.text_disabled;
+                                    font-size: InterfaceStyle.tv ? 22px : 15px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+
+                                btn_touch := TouchArea {
+                                    enabled: root.open && it.enabled;
+                                    mouse-cursor: pointer;
+                                    clicked => { root.picked(i); }
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        height: InterfaceStyle.tv ? 64px : 48px;
+                        vertical-stretch: 0;
+                        border-radius: 8px;
+                        border-width: root.keyboard_navigation && (InterfaceStyle.tv || SettingsStyle.keyboard-mode) && root.tv-index == root.items.length ? 2px : 0px;
+                        border-color: Theme.current.focus_ring;
+                        background: cancel_touch.has-hover ? Theme.current.control_hover : transparent;
+
+                        Text {
+                            text: @tr("Cancel");
+                            color: Theme.current.accent;
+                            font-size: InterfaceStyle.tv ? 22px : 15px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        cancel_touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { if (root.open) { root.closed(); } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

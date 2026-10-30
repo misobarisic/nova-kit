@@ -1,0 +1,56 @@
+// Match Home's native scrolling. This wrapper only bridges the retained page
+// offset: Flickable removes viewport bindings when a gesture starts.
+export component LibraryScroll inherits Rectangle {
+    clip: true;
+    in property <length> content-height;
+    in-out property <length> content-y;
+    out property <length> visible-width: root.width;
+    out property <length> visible-height: root.height;
+    private property <length> last_reported_y;
+
+    function bounded(y: length) -> length {
+        return Math.clamp(y, Math.min(0px, root.height - root.content-height), 0px);
+    }
+    public function stop() {
+        // Assigning the current native position cancels its property animation.
+        native.content-y = root.bounded(root.content-y);
+        root.content-y = native.content-y;
+    }
+    changed content-y => {
+        // Native movement already has this value. Writing it back would stop
+        // the very momentum animation whose offset we are trying to remember.
+        if root.last_reported_y != root.content-y {
+            root.last_reported_y = root.content-y;
+            native.content-y = root.content-y;
+        }
+    }
+    changed content-height => {
+        if root.content-height > 0px && root.height > 0px { root.stop(); }
+    }
+    changed height => {
+        if root.content-height > 0px && root.height > 0px { root.stop(); }
+    }
+    native := Flickable {
+        width: 100%; height: 100%;
+        content-width: self.width;
+        content-height: root.content-height;
+        // Native physics deliberately intercepts ordinary value assignments.
+        // Explicit application offsets must replace that physics binding;
+        // this applies only to our writes, not native gesture animations.
+        animate content-y { duration: 0ms; }
+        init => { self.content-y = root.content-y; }
+        changed content-y => {
+            // A retained offset can be assigned before this deferred native
+            // notification runs. Give that explicit request priority over the
+            // next animation sample, regardless of callback ordering.
+            if root.content-y != root.last_reported_y {
+                root.last_reported_y = root.content-y;
+                self.content-y = root.content-y;
+            } else {
+                root.last_reported_y = self.content-y;
+                root.content-y = self.content-y;
+            }
+        }
+        @children
+    }
+}

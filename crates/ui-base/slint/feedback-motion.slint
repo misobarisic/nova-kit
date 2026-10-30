@@ -1,0 +1,18 @@
+import { Anim } from "@NovaUiShared";
+
+// A zero-sized animation driver: controls keep their hitboxes and layout
+// unchanged, and callers can gate selection and hover independently.
+export component FeedbackProgress inherits Rectangle {
+    width: 0px; height: 0px; visible: false;
+    in property <bool> active;
+    in property <bool> motion: Anim.enabled;
+    in property <duration> duration: Anim.control_state;
+    private property <float> target: root.active ? 1 : 0;
+    private property <float> animated: root.target;
+    out property <float> value: root.motion ? root.animated : root.target;
+    animate animated { duration: root.motion ? root.duration : 0ms; easing: ease-out; }
+    changed target => { root.animated = root.target; }
+    // Cancel an in-flight tween when its category is disabled; re-enabling
+    // must never resume feedback for an old selection.
+    changed motion => { root.animated = root.target; }
+}

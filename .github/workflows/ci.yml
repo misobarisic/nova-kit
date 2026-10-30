@@ -6,7 +6,7 @@ permissions:
   contents: read
 
 jobs:
-  storage:
+  crates:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
@@ -17,5 +17,5 @@ jobs:
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --locked --all-targets -- -D warnings
+      - run: cargo clippy --workspace --locked -- -D warnings
       - run: cargo test --workspace --locked

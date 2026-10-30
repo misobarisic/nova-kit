@@ -1,0 +1,7 @@
+import { ScrollView as StandardScrollView } from "std-widgets.slint";
+
+// Keep native scrolling and viewport sizing, without visible scroll tracks.
+export component ScrollView inherits StandardScrollView {
+    horizontal-scrollbar-policy: always-off;
+    vertical-scrollbar-policy: always-off;
+}

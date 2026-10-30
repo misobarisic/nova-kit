@@ -1,0 +1,9 @@
+import { ControlInput } from "@NovaUiShared";
+// Touch hover can outlive a Flickable's delayed input stack. Visual feedback
+// must follow the active press on touch platforms, rather than that hover flag.
+
+
+export component ControlTouchArea inherits TouchArea {
+    out property <bool> feedback-active: root.enabled
+        && (ControlInput.touch-feedback ? root.pressed : root.has-hover);
+}

@@ -1,0 +1,267 @@
+import { Theme, Anim, InterfaceStyle, SettingsStyle } from "@NovaUiShared";
+import { FeedbackProgress } from "feedback-motion.slint";
+import { ControlTouchArea } from "control-input.slint";
+
+// Touch-friendly dropdown replacing std-widgets ComboBox.
+//
+// Why not ComboBox: its popup ScrollView leaves Flickable.interactive at
+// false (the fluent style hardcodes `interactive: false`, and only the
+// `mouse-drag-pan-enabled` opt-in flips it). The stock popup never opts
+// in, so on touch-only devices (Android) a popup list longer than the
+// visible 6 rows cannot be scrolled at all — desktop works via the mouse
+// wheel, which touch devices don't have. This component's popup opts into
+// drag-pan explicitly, like every other ScrollView in the app.
+//
+// API mirrors the ComboBox surface this app uses: `model`,
+// two-way `current-index`, `selected(string)`. `placeholder-text` shows
+// (dimmed) while no index is selected. `roomy` selects 44px touch rows,
+// otherwise 32px desktop rows; the closed box is always exactly one row
+// tall so filter rows keep their pinned heights.
+import { ScrollView } from "scrollview.slint";
+import { IcChevronDown } from "icons.slint";
+
+export component Dropdown inherits Rectangle {
+    in property <[string]> model;
+    // Optional display text per entry, parallel to `model`. Lets a caller show
+    // a translated label (the automatic library buckets) while `selected`
+    // still reports the stored value the app filters on. Shorter than `model`
+    // (or empty) means "show the model entry as-is".
+    in property <[string]> labels: [];
+    in-out property <int> current-index: -1;
+    in property <string> placeholder-text: "";
+    in property <bool> enabled: true;
+    in property <bool> roomy: false;
+    in property <bool> pill: false;
+    // Page-level catalog selectors use the same navy surface and rounded
+    // popup treatment as Settings and the player; compact callers retain
+    // their existing geometry.
+    in property <bool> prominent: false;
+    // Opt-in for dropdowns hosted in a horizontal filter rail. Report the
+    // early gesture axis before the enclosing page can capture vertical pan.
+    in property <bool> rail-gesture: false;
+
+    callback selected(string);
+    callback opened();
+    callback pan_hint();
+    callback pan_release();
+
+    property <length> item-h: InterfaceStyle.tv ? 56px : root.roomy ? 44px : 32px;
+    property <int> popup-index: 0;
+    function open_popup() {
+        root.opened();
+        root.popup-index = Math.max(0, root.current-index);
+        popup.show();
+    }
+    forward-focus: closed_scope;
+    closed_scope := FocusScope {
+        enabled: root.enabled && InterfaceStyle.tv;
+        key-pressed(e) => {
+            if InterfaceStyle.tv && (e.text == Key.Return || e.text == " ") && root.model.length > 0 {
+                SettingsStyle.keyboard-mode = true;
+                if !e.repeat { root.open_popup(); }
+                accept
+            } else { reject }
+        }
+    }
+    // Visible popup rows, capped like the stock control.
+    property <int> shown: Math.min(6, root.model.length);
+    property <bool> has_selection: root.current-index >= 0 && root.current-index < root.model.length;
+    // Display text of entry `i`: its label when one is given, else the value.
+    pure function text_at(i: int) -> string {
+        return i >= 0 && i < root.labels.length ? root.labels[i] : (i >= 0 && i < root.model.length ? root.model[i] : "");
+    }
+    property <string> shown-text: root.has_selection ? root.text_at(root.current-index) : root.placeholder-text;
+
+    height: root.item-h;
+    border-radius: Math.min(Theme.button_corner_radius, Math.min(self.width, self.height) / 2);
+    border-width: InterfaceStyle.tv && closed_scope.has-focus ? 2px : 1px;
+    border-color: InterfaceStyle.tv && closed_scope.has-focus ? Theme.current.focus_ring : Theme.current.control_border;
+    hover_feedback := FeedbackProgress { active: touch.feedback-active && root.enabled; motion: Anim.enabled && Anim.hover; duration: Anim.hover_fast; }
+    open_feedback := FeedbackProgress { active: popup.is-open; }
+    background: root.prominent
+        ? Theme.current.settings_control_hover.mix(Theme.current.settings_control, hover_feedback.value)
+        : Theme.current.input_hover.mix(Theme.current.popup, hover_feedback.value);
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 8px;
+
+        Text {
+            text: root.shown-text;
+            color: root.has_selection ? Theme.current.text_primary : Theme.current.text_muted;
+            font-size: InterfaceStyle.tv ? 20px : root.prominent ? 14px : 13px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+
+        if !root.prominent: Rectangle {
+            width: 12px; height: 100%;
+            IcChevronDown { width: 12px; height: 12px; y: (parent.height - self.height) / 2; fill: Theme.current.text_muted; transform-rotation: open_feedback.value * 180deg; }
+        }
+        if root.prominent: Rectangle {
+            width: 18px; height: 100%;
+            IcChevronDown { width: 18px; height: 18px; y: (parent.height - self.height) / 2; fill: Theme.current.text_secondary; transform-rotation: open_feedback.value * 180deg; }
+        }
+    }
+
+    touch := ControlTouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        property <bool> dragged: false;
+        property <length> hint_x: 0px;
+        property <length> hint_y: 0px;
+        property <bool> hint_live: false;
+        property <bool> hint_held: false;
+        function hint_stop() {
+            self.hint_live = false;
+            if (self.hint_held) {
+                self.hint_held = false;
+                root.pan_release();
+            }
+        }
+        pointer-event(ev) => {
+            if (!root.rail-gesture) { return; }
+            if (ev.kind == PointerEventKind.down) {
+                self.dragged = false;
+                self.hint_x = self.mouse-x;
+                self.hint_y = self.mouse-y;
+                self.hint_live = true;
+            } else if (ev.kind == PointerEventKind.up || ev.kind == PointerEventKind.cancel) {
+                self.hint_stop();
+            } else if (ev.kind == PointerEventKind.move) {
+                if (!(self.pressed || ev.touch-finger-id != 0)) {
+                    self.hint_stop();
+                    return;
+                }
+                if (!self.hint_live) {
+                    self.hint_x = self.mouse-x;
+                    self.hint_y = self.mouse-y;
+                    self.hint_live = true;
+                }
+                let dx = self.mouse-x - self.hint_x;
+                let dy = self.mouse-y - self.hint_y;
+                if (Math.abs(dx) + Math.abs(dy) > 12px) { self.dragged = true; }
+                if (Math.abs(dy) > 8px && Math.abs(dy) > Math.abs(dx)) {
+                    self.hint_stop();
+                } else {
+                    self.hint_held = true;
+                    root.pan_hint();
+                }
+            }
+        }
+        changed pressed => {
+            if (!self.pressed) { self.hint_stop(); }
+        }
+        clicked => {
+            if (!self.dragged && root.model.length > 0) {
+                root.open_popup();
+            }
+            self.dragged = false;
+        }
+    }
+
+    popup := PopupWindow {
+        forward-focus: popup_scope;
+        x: 0;
+        y: root.prominent ? root.height + 6px : -4px;
+        width: root.width;
+        height: root.shown * root.item-h + (root.prominent ? 16px : 8px);
+        close-policy: close-on-click-outside;
+
+        popup_scope := FocusScope {
+            width: 100%;
+            height: 100%;
+            init => { self.focus(); if InterfaceStyle.tv { popup_scroll.content-y = -Math.max(0px, (root.popup-index + 1) * root.item-h - popup_scroll.visible-height); } }
+            capture-key-pressed(e) => {
+                if (e.text == Key.Back || (InterfaceStyle.tv && e.text == Key.Escape)) {
+                    if (!e.repeat) { popup.close(); if InterfaceStyle.tv { closed_scope.focus(); } }
+                    accept
+                } else if InterfaceStyle.tv && (e.text == Key.UpArrow || e.text == Key.DownArrow) {
+                    root.popup-index = Math.clamp(root.popup-index + (e.text == Key.UpArrow ? -1 : 1), 0, root.model.length - 1);
+                    popup_scroll.content-y = -Math.max(0px, (root.popup-index + 1) * root.item-h - popup_scroll.visible-height);
+                    accept
+                } else if InterfaceStyle.tv && (e.text == Key.Return || e.text == " ") {
+                    if !e.repeat && root.popup-index < root.model.length {
+                        root.current-index = root.popup-index;
+                        root.selected(root.model[root.popup-index]);
+                        popup.close();
+                        closed_scope.focus();
+                    }
+                    accept
+                } else {
+                    reject
+                }
+            }
+            capture-key-released(e) => {
+                if (e.text == Key.Back) { accept } else { reject }
+            }
+
+            Rectangle {
+                width: 100%;
+                height: 100%;
+                background: root.prominent ? Theme.current.card : Theme.current.popup;
+                border-width: 1px;
+                border-color: Theme.current.control_border;
+                border-radius: root.prominent ? 16px : 6px;
+                clip: true;
+
+                popup_scroll := ScrollView {
+                    width: 100%;
+                    height: 100%;
+                    // THE fix (see header comment): without this, touch
+                    // drags do nothing and popup lists are frozen on Android.
+                    mouse-drag-pan-enabled: true;
+
+                    VerticalLayout {
+                        width: 100%;
+                        padding: root.prominent ? 8px : 4px;
+                        spacing: 0px;
+                        alignment: start;
+
+                        for value[index] in root.model: Rectangle {
+                            width: 100%;
+                            height: root.item-h;
+                            border-radius: root.prominent ? 10px : 4px;
+                            border-width: InterfaceStyle.tv && index == root.popup-index ? 2px : 0px;
+                            border-color: Theme.current.focus_ring;
+                            row_hover := FeedbackProgress { active: item_touch.feedback-active; motion: Anim.enabled && Anim.hover; duration: Anim.hover_fast; }
+                            row_selection := FeedbackProgress { active: index == root.current-index; }
+                            background: Theme.current.selection_wash.mix(Theme.current.control_hover.mix(transparent, row_hover.value), row_selection.value);
+
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+
+                                Text {
+                                    text: root.text_at(index);
+                                    color: Theme.current.accent_soft.mix(Theme.current.text_primary, root.prominent ? row_selection.value : 0);
+                                    font-size: InterfaceStyle.tv ? 20px : root.prominent ? 14px : 13px;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                            }
+
+                            item_touch := ControlTouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.current-index = index;
+                                    root.selected(value);
+                                    popup.close();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    states [
+        disabled when !root.enabled : {
+            root.opacity: 0.5;
+        }
+    ]
+}

@@ -1,0 +1,11 @@
+[package]
+name = "nova-ui-base"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+links = "novauibase"
+
+[dev-dependencies]
+slint-build = "=1.18.0"
+tempfile = "3"
