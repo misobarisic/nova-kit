@@ -2,6 +2,9 @@
 
 Shared Rust crates for the Nova applications, under GPL-3.0-or-later.
 
+See the [sync extraction assessment](SYNC-PLAN.md) for the audited boundary and
+delivery plan for sharing Nova's sync engine and settings UI with Reader.
+
 | Package | Responsibility |
 | --- | --- |
 | `nova-storage` | redb JSON storage, atomic batches, collections, compressed metadata and durable sequences |
