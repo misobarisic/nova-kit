@@ -80,6 +80,9 @@ Do not point cache roots at durable downloads or imported original files.
 
 ## Development
 
+On Debian/Ubuntu, install `pkg-config libfontconfig1-dev` for the image cache's
+Slint font dependency before running the workspace checks.
+
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --locked -- -D warnings
