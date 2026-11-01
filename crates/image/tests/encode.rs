@@ -20,6 +20,62 @@ fn legacy_pixels() -> Vec<u8> {
 }
 
 #[test]
+fn avif_quality_100_is_not_pixel_lossless_even_with_rgb_storage() {
+    let mut state = 0x1234abcd_u32;
+    let pixels: Vec<u8> = (0..32 * 24)
+        .flat_map(|_| {
+            let mut pixel = [0, 0, 0, 255];
+            for channel in &mut pixel[..3] {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                *channel = state as u8;
+            }
+            pixel
+        })
+        .collect();
+    let limits = DecodeLimits::default();
+    let ordinary = encode_avif(32, 24, &pixels, 100, limits).unwrap();
+    let decoded = decode_avif(&ordinary, limits).unwrap();
+    assert_ne!(
+        decoded.as_raw(),
+        &pixels,
+        "quality 100 must not be advertised as lossless"
+    );
+
+    // Removing the YCbCr round trip still cannot enable an unsupported AV1
+    // lossless mode in rav1e. Verify the tempting quality-100/RGB workaround.
+    let rgba = pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| ravif::RGBA8::new(p[0], p[1], p[2], p[3]))
+        .collect::<Vec<_>>();
+    let rgb = ravif::Encoder::new()
+        .with_bit_depth(ravif::BitDepth::Eight)
+        .with_quality(100.)
+        .with_alpha_quality(100.)
+        .with_internal_color_model(ravif::ColorModel::RGB)
+        .with_alpha_color_mode(ravif::AlphaColorMode::UnassociatedDirty)
+        .with_num_threads(Some(1))
+        .with_speed(8)
+        .encode_rgba(ravif::Img::new(&rgba, 32, 24))
+        .unwrap()
+        .avif_file;
+    let decoded = decode_avif(&rgb, limits).unwrap();
+    // Compare opaque pixels as well, excluding invisible RGB differences.
+    assert!(
+        decoded
+            .as_raw()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(pixels.as_chunks::<4>().0)
+            .any(|(actual, source)| source[3] == 255 && actual != source)
+    );
+}
+
+#[test]
 fn moved_encoder_is_byte_identical_to_actual_reader_encoder() {
     let bytes = encode_avif(32, 24, &legacy_pixels(), 73, DecodeLimits::default()).unwrap();
     assert_eq!(bytes, include_bytes!("fixtures/reader-legacy-rgba.avif"));

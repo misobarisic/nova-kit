@@ -88,6 +88,18 @@ and encoder code, with the complete BSD-licensed patched decoder vendored once
 in Kit. See [codec provenance](crates/image/PROVENANCE.md). Existing files are
 not reencoded merely by choosing AVIF; explicit maintenance remains app-owned.
 
+AVIF encoding is **lossy**, including quality 100. rav1e 0.8.1 does not
+implement lossless AV1; a pixel-roundtrip regression also checks RGB storage
+at quality 100 rather than assuming that removing YCbCr conversion is enough.
+Applications must not offer a lossless AVIF switch for this encoder.
+
+`nova-image::is_lossless_input` conservatively identifies PNG and WebP VP8L
+for input-aware cache policies. An AVIF/JPEG XL signature alone cannot prove
+that a source is lossless. `lossless_input_requires_original` identifies 16-bit
+PNG, which the 8-bit processing path must retain rather than silently reducing
+precision when lossless compression is requested. These helpers classify source
+encoding; normal bounded image admission is still required.
+
 ## Development
 
 ### Nix

@@ -11,6 +11,9 @@ display/window integration tests and delegates codec operations here.
 `encode_avif` relocates the actual AVIF branch of that revision's
 `src/reader_export.rs::encode_rgba`: ravif 0.13.0, eight-bit output, caller
 quality, alpha quality 100, unassociated alpha, one thread and speed 8.
+This is lossy encoding at every quality, including 100: rav1e 0.8.1 explicitly
+does not implement lossless AV1. `tests/encode.rs` verifies changed decoded
+pixels for both the production path and the quality-100/RGB workaround.
 `DecodeLimits` and `PageDimensions` retain Reader's exact shape/defaults.
 Encoding checks the admitted RGBA dimensions/bytes and encoded output cap;
 ravif's transient working memory is additional, as in Reader. Decoder admission

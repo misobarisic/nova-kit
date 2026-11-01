@@ -6,6 +6,8 @@ mod jxl;
 pub use jxl::{decode as decode_jxl, inspect as inspect_jxl, is_jpeg_xl};
 mod jxl_encode;
 pub use jxl_encode::{JxlEncoding, encode_jxl, transcode_jpeg_to_jxl};
+mod source_encoding;
+pub use source_encoding::{is_lossless_input, lossless_input_requires_original};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -42,7 +44,9 @@ pub struct PageDimensions {
     pub height: u32,
 }
 
-/// Reader's actual 8-bit encoder settings, including alpha quality 100.
+/// Reader's actual 8-bit lossy encoder settings, including alpha quality 100.
+/// Even quality 100 is not lossless: rav1e does not implement lossless AV1,
+/// and the RGB-to-YCbCr conversion can also change samples.
 /// Limits admit the input RGBA and encoded output; ravif's transient working
 /// memory is additional, as in the original Reader implementation.
 pub fn encode_avif(
