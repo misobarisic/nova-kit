@@ -91,7 +91,7 @@ fn jixel_lossless_preserves_every_rgba_sample_and_rejects_invalid_input() {
                     (i * 31) as u8,
                     (i * 17) as u8,
                     (i * 7) as u8,
-                    (i * 19) as u8,
+                    if i % 5 == 0 { 0 } else { (i * 19) as u8 },
                 ]
             })
             .collect::<Vec<_>>();
