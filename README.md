@@ -9,6 +9,7 @@ Shared Rust crates for the Nova applications, under GPL-3.0-or-later.
 | `nova-download` | Existing download jobs, HTTP resume, finite HLS bundles, cancellation, filesystem capacity and offline budgeting |
 | `nova-ui-base` | Slint source components, theme/animation tokens and associated assets |
 | `nova-cache` | Nova's processed image variants, decoded LRU, atomic encoded-page cache, batched usage index and incremental grouped eviction |
+| `nova-image` | Reader's actual bounded portable eight-bit AVIF still decoder and RGBA encoder, shared by Nova and Reader |
 
 Storage was extracted from Nova commit
 `7a0cb47d0977fdb64601af4f37a6e7d53b6f5e45`. Addons, downloads and UI components
@@ -78,10 +79,41 @@ separate budgets to preserve plentiful small posters when chapter pages turn
 over. `touch` and decoded hits update usage in memory; persistence is batched.
 Do not point cache roots at durable downloads or imported original files.
 
+The image cache also supports AVIF through `nova-image`. JPEG/WebP recipe keys
+and their quality setting are unchanged; AVIF has its own quality default of
+85. The codec exposes caller-bounded `inspect_avif`, `decode_avif` and
+`encode_avif`, preserves native dimensions and alpha, and rejects unsupported
+animation/transforms/bit depths. It uses Reader's actual scalar portable decoder
+and encoder code, with the complete BSD-licensed patched decoder vendored once
+in Kit. See [codec provenance](crates/image/PROVENANCE.md). Existing files are
+not reencoded merely by choosing AVIF; explicit maintenance remains app-owned.
+
 ## Development
 
-On Debian/Ubuntu, install `pkg-config libfontconfig1-dev` for the image cache's
-Slint font dependency before running the workspace checks.
+### Nix
+
+Use the same pinned Fenix stable toolchain and native headers as Linux CI:
+
+```sh
+nix develop
+```
+
+The flake copies Nova/Reader's existing `flake.lock` pins and Nova's host Rust
+component list. Its default shell supplies Cargo, rustc, rustfmt, Clippy,
+pkg-config, fontconfig/FreeType, CMake and stdenv's C/C++ compiler. Bundled WebP
+uses that compiler; the scalar AVIF path needs no assembler or system codec.
+Shells are exposed for `x86_64-linux`, `aarch64-linux` and `aarch64-darwin`.
+They are development shells, rather than Nix package or release outputs.
+
+For individual checks without entering the interactive shell, use
+`nix develop --command cargo test --workspace --locked` and the corresponding
+format/Clippy commands below. Linux CI runs these commands through the same
+shell. Native Windows CI runs independently with stable Rust and MSVC so its
+filesystem/file-lock tests exercise Windows itself.
+
+Without Nix, Debian/Ubuntu developers need `pkg-config libfontconfig1-dev`
+and a C/C++ toolchain before running the same Cargo checks. Windows developers
+use stable Rust with the native MSVC build tools.
 
 ```sh
 cargo fmt --all -- --check

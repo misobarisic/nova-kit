@@ -48,6 +48,9 @@ impl Cache {
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
     }
+    pub fn tracked_usage(&self) -> Option<(u64, usize)> {
+        gc::tracked_usage(&self.directory)
+    }
     /// Memory-only recency update; no index serialization or filesystem access.
     pub fn touch(&self, key: &str) {
         gc::touch_variant(&self.directory, &image_recipe_cache_key(key, recipe()));

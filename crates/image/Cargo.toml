@@ -1,0 +1,14 @@
+[package]
+name = "nova-image"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+image = { version = "0.25.10", default-features = false }
+thiserror = "2"
+avif-parse = "=2.1.0"
+rav1d = { package = "ferri-pdf-rav1d", path = "../../vendor/ferri-pdf-rav1d", default-features = false, features = ["bitdepth_8"] }
+yuv = { version = "=0.8.19", default-features = false }
+ravif = { version = "=0.13.0", default-features = false }

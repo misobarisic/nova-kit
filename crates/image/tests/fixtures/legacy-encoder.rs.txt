@@ -1,0 +1,20 @@
+fn main()->Result<(),String>{
+let (width,height,quality)=(32u32,24u32,73u8);
+let pixels=(0..height).flat_map(|y|(0..width).flat_map(move|x|[(x*7)as u8,(y*9)as u8,((x+y)*4)as u8,if(x+y)%5==0{0}else{96+(x%3)as u8*79}])).collect::<Vec<u8>>();
+            let rgba = pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| ravif::RGBA8::new(pixel[0], pixel[1], pixel[2], pixel[3]))
+                .collect::<Vec<_>>();
+            let bytes = ravif::Encoder::new()
+                .with_bit_depth(ravif::BitDepth::Eight)
+                .with_quality(f32::from(quality))
+                .with_alpha_quality(100.)
+                .with_alpha_color_mode(ravif::AlphaColorMode::UnassociatedDirty)
+                .with_num_threads(Some(1))
+                .with_speed(8)
+                .encode_rgba(ravif::Img::new(&rgba, width as usize, height as usize))
+                .map_err(|error| format!("Cannot encode AVIF image: {error}"))?
+                .avif_file;
+std::fs::write(std::env::args().nth(1).unwrap(),bytes).map_err(|e|e.to_string())?;Ok(())}

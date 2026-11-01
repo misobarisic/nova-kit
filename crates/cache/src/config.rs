@@ -10,6 +10,7 @@ use std::{
 pub enum CacheImageFormat {
     Jpeg,
     Webp,
+    Avif,
 }
 
 impl CacheImageFormat {
@@ -17,6 +18,7 @@ impl CacheImageFormat {
         match self {
             CacheImageFormat::Jpeg => "JPEG",
             CacheImageFormat::Webp => "WebP",
+            CacheImageFormat::Avif => "AVIF",
         }
     }
 }
@@ -28,6 +30,7 @@ pub struct CacheSettings {
     pub enabled: bool,
     pub format: CacheImageFormat,
     pub quality: u8,
+    pub avif_quality: u8,
     pub detail_poster_max_side: Option<u32>,
     pub detail_backdrop_max_side: Option<u32>,
     pub episode_thumbnail_max_side: Option<u32>,
@@ -46,6 +49,9 @@ pub const fn default_image_disk_cache_limit() -> Option<u32> {
 pub const fn default_cache_image_format() -> CacheImageFormat {
     CacheImageFormat::Webp
 }
+pub const fn default_avif_quality() -> u8 {
+    85
+}
 pub const fn default_cache_image_quality() -> u8 {
     50
 }
@@ -57,6 +63,7 @@ impl Default for CacheSettings {
             enabled: true,
             format: default_cache_image_format(),
             quality: default_cache_image_quality(),
+            avif_quality: default_avif_quality(),
             detail_poster_max_side: Some(480),
             detail_backdrop_max_side: Some(960),
             episode_thumbnail_max_side: Some(360),
@@ -71,8 +78,16 @@ impl CacheSettings {
         let format = match self.format {
             CacheImageFormat::Jpeg => "jpeg",
             CacheImageFormat::Webp => "webp",
+            CacheImageFormat::Avif => "avif",
         };
-        format!("{format}:q{}", self.quality)
+        format!(
+            "{format}:q{}",
+            if self.format == CacheImageFormat::Avif {
+                self.avif_quality
+            } else {
+                self.quality
+            }
+        )
     }
 }
 
@@ -93,6 +108,7 @@ impl<'de> Deserialize<'de> for CacheSettings {
             enabled: bool,
             format: CacheImageFormat,
             quality: u8,
+            avif_quality: u8,
             detail_poster_max_side: Option<u32>,
             detail_backdrop_max_side: Option<u32>,
             episode_thumbnail_max_side: Option<u32>,
@@ -106,6 +122,7 @@ impl<'de> Deserialize<'de> for CacheSettings {
             enabled: w.enabled,
             format: w.format,
             quality: w.quality,
+            avif_quality: w.avif_quality,
             detail_poster_max_side: w.detail_poster_max_side,
             detail_backdrop_max_side: w.detail_backdrop_max_side,
             episode_thumbnail_max_side: w.episode_thumbnail_max_side,
@@ -186,6 +203,7 @@ pub fn set_cache_settings(settings: CacheSettings) {
         || current.enabled != settings.enabled
         || current.format != settings.format
         || current.quality != settings.quality
+        || current.avif_quality != settings.avif_quality
         || current.detail_poster_max_side != settings.detail_poster_max_side
         || current.detail_backdrop_max_side != settings.detail_backdrop_max_side
         || current.episode_thumbnail_max_side != settings.episode_thumbnail_max_side

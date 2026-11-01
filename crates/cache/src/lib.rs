@@ -68,7 +68,11 @@ impl ImageRecipe {
             compress: settings.enabled,
             format: settings.enabled.then_some(settings.format),
             quality: if settings.enabled {
-                settings.quality.clamp(1, 100)
+                if settings.format == CacheImageFormat::Avif {
+                    settings.avif_quality.clamp(1, 100)
+                } else {
+                    settings.quality.clamp(1, 100)
+                }
             } else {
                 0
             },
@@ -261,12 +265,24 @@ pub fn image_buffers_equal(a: &Pixels, b: &Pixels) -> bool {
 pub fn decode_image_bytes(
     bytes: &[u8],
 ) -> Result<Pixels, Box<dyn std::error::Error + Send + Sync>> {
-    let rgba = image::load_from_memory(bytes)?.into_rgba8();
+    let rgba = decode_source(bytes)?.into_rgba8();
     Ok(SharedPixelBuffer::clone_from_slice(
         rgba.as_raw(),
         rgba.width(),
         rgba.height(),
     ))
+}
+fn decode_source(
+    bytes: &[u8],
+) -> Result<image::DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
+    if image::guess_format(bytes).is_ok_and(|format| format == image::ImageFormat::Avif) {
+        Ok(image::DynamicImage::ImageRgba8(nova_image::decode_avif(
+            bytes,
+            nova_image::DecodeLimits::default(),
+        )?))
+    } else {
+        Ok(image::load_from_memory(bytes)?)
+    }
 }
 pub fn downscale_for_display(pixels: &Pixels, max_side: u32) -> Pixels {
     if max_side == 0 || pixels.width().max(pixels.height()) <= max_side {
@@ -336,6 +352,16 @@ fn encode_rgba(rgba: &image::RgbaImage, recipe: ImageRecipe) -> Option<Vec<u8>> 
     let _permit = EncodingPermit::acquire();
     let mut bytes = Vec::new();
     match recipe.format {
+        Some(CacheImageFormat::Avif) => {
+            bytes = nova_image::encode_avif(
+                rgba.width(),
+                rgba.height(),
+                rgba.as_raw(),
+                recipe.quality,
+                nova_image::DecodeLimits::default(),
+            )
+            .ok()?;
+        }
         Some(CacheImageFormat::Webp) => {
             bytes = webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height())
                 .encode_simple(false, recipe.quality as f32)
@@ -374,7 +400,7 @@ fn process_source_with(
     recipe: ImageRecipe,
     encoder: impl FnOnce(&image::RgbaImage, ImageRecipe) -> Option<Vec<u8>>,
 ) -> Option<Processed> {
-    let source = image::load_from_memory(&bytes).ok()?;
+    let source = decode_source(&bytes).ok()?;
     let resized = fit_source(source, recipe.max_side)?;
     let rgba = resized.into_rgba8();
     let encoded = if !recipe.compress && recipe.max_side.is_none() {
@@ -1441,7 +1467,7 @@ fn rewrite_entries_with(
             continue;
         };
         // Decode the source once per URL; no recipe starts from a cached derivative.
-        let Ok(source) = image::load_from_memory(&bytes) else {
+        let Ok(source) = decode_source(&bytes) else {
             result.failed += 1;
             result.processed += 1;
             progress(result);

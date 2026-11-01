@@ -83,6 +83,7 @@ struct Index {
 
 #[derive(Default)]
 struct State {
+    initialized: bool,
     records: BTreeMap<String, Record>,
     by_key: HashMap<String, String>,
     bytes: u64,
@@ -141,6 +142,14 @@ static TRACKERS: LazyLock<Mutex<HashMap<PathBuf, Weak<Tracker>>>> =
 
 fn tracker(directory: &Path) -> Option<Arc<Tracker>> {
     TRACKERS.lock().unwrap().get(directory)?.upgrade()
+}
+/// Memory-only validated inventory snapshot. None until startup inventory is ready.
+pub fn tracked_usage(directory: &Path) -> Option<(u64, usize)> {
+    let tracker = tracker(directory)?;
+    let state = tracker.state.lock().unwrap();
+    state
+        .initialized
+        .then_some((state.bytes, state.records.len()))
 }
 pub(super) fn touch_variant(directory: &Path, key: &str) {
     if let Some(tracker) = tracker(directory) {
@@ -439,6 +448,7 @@ impl Tracker {
         for (name, record) in found {
             state.insert(name, record);
         }
+        state.initialized = true;
         state.dirty = true;
         Ok(true)
     }
@@ -472,6 +482,7 @@ impl Tracker {
         }
         // Persist the running marker once; subsequent index writes are batched.
         self.flush(false, true)?;
+        self.state.lock().unwrap().initialized = true;
         Ok(true)
     }
 
@@ -1071,6 +1082,7 @@ mod tests {
         let _serial = serial();
         let fixture = Fixture::new("gc-blob-touch");
         let cache = blob::Cache::new(fixture.tracker.directory.clone(), 64);
+        assert_eq!(cache.tracked_usage(), None);
         assert!(
             cache
                 .put_if_current(
@@ -1088,7 +1100,17 @@ mod tests {
             (name.clone(), record.key.clone())
         };
         fixture.tracker.state.lock().unwrap().touch(&key, 1);
+        fixture.tracker.initialize().unwrap();
+        let usage = cache.tracked_usage().unwrap();
+        assert_eq!(usage.1, 1);
+        assert!(usage.0 > 0);
         fs::remove_file(fixture.tracker.directory.join(name)).unwrap();
+        fs::remove_file(fixture.tracker.directory.join(INDEX_NAME)).unwrap();
+        assert_eq!(
+            cache.tracked_usage(),
+            Some(usage),
+            "tracked quota admission is a memory-only snapshot"
+        );
         let before = nova_config::now_secs();
         cache.touch("opaque-page-key");
         let state = fixture.tracker.state.lock().unwrap();

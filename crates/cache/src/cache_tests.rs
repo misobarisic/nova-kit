@@ -107,6 +107,102 @@ pub(super) fn source_image(w: u32, h: u32, transparent: bool) -> Vec<u8> {
 fn settings() -> CacheSettings {
     CacheSettings::default()
 }
+
+#[test]
+fn avif_processed_cold_memory_disk_and_source_rewrite_use_shared_codec() {
+    let _serial = serial();
+    let dir = scratch("avif-shared-codec");
+    let url = "https://unit.test/avif-shared";
+    let bytes = source_image(32, 48, true);
+    let settings = CacheSettings {
+        format: CacheImageFormat::Avif,
+        avif_quality: 91,
+        ..settings()
+    };
+    let cold = cached_pixels_with(&dir, url, ImageUse::Fixed(Some(32)), &settings, || {
+        Some(bytes)
+    })
+    .unwrap();
+    let path = recipe_disk_path(
+        &dir,
+        url,
+        ImageRecipe::resolve(ImageUse::Fixed(Some(32)), &settings),
+    );
+    let original = fs::read(&path).unwrap();
+    let variant = read_variant(&path).unwrap();
+    assert_eq!(
+        image::guess_format(&variant.encoded).unwrap(),
+        image::ImageFormat::Avif
+    );
+    assert_eq!(variant.metadata.recipe.quality, 91);
+    assert!(image_buffers_equal(
+        &cold,
+        &cached_pixels_with(&dir, url, ImageUse::Fixed(Some(32)), &settings, || panic!(
+            "memory hit"
+        ))
+        .unwrap()
+    ));
+    decoded_cache_clear();
+    assert!(image_buffers_equal(
+        &cold,
+        &cached_pixels_with(&dir, url, ImageUse::Fixed(Some(32)), &settings, || panic!(
+            "disk hit"
+        ))
+        .unwrap()
+    ));
+    assert_eq!(fs::read(&path).unwrap(), original);
+    let target = CacheSettings {
+        avif_quality: 30,
+        ..settings.clone()
+    };
+    let source = include_bytes!("../../image/tests/fixtures/tiny.avif");
+    let result = rewrite_entries_with(
+        &dir,
+        &target,
+        &AtomicBool::new(false),
+        |_| {},
+        |_| Some(source.to_vec()),
+    );
+    assert_eq!(result.converted, 1);
+    let (_, variant) = disk_variants(&dir).into_iter().next().unwrap();
+    assert_eq!(variant.metadata.recipe.quality, 30);
+    assert_eq!((variant.metadata.width, variant.metadata.height), (16, 16));
+    assert!(nova_image::decode_avif(&variant.encoded, nova_image::DecodeLimits::default()).is_ok());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn jpeg_webp_recipe_keys_remain_identical_and_avif_uses_its_own_quality() {
+    for (format, name) in [
+        (CacheImageFormat::Jpeg, "jpeg"),
+        (CacheImageFormat::Webp, "webp"),
+    ] {
+        let settings = CacheSettings {
+            format,
+            avif_quality: 13,
+            ..settings()
+        };
+        let recipe = ImageRecipe::resolve(ImageUse::DetailPoster, &settings);
+        assert_eq!(
+            recipe.key(),
+            format!("{{\"max_side\":480,\"compress\":true,\"format\":\"{name}\",\"quality\":50}}")
+        );
+    }
+    let settings = CacheSettings {
+        format: CacheImageFormat::Avif,
+        quality: 12,
+        avif_quality: 85,
+        ..settings()
+    };
+    assert_eq!(
+        ImageRecipe::resolve(ImageUse::DetailPoster, &settings).quality,
+        85
+    );
+    assert_eq!(settings.config_key(), "avif:q85");
+    let old: CacheSettings = serde_json::from_str(r#"{"format":"webp","quality":50}"#).unwrap();
+    assert_eq!(old.avif_quality, 85);
+    assert_eq!(old.quality, 50);
+}
 fn disk_variants(dir: &Path) -> Vec<(PathBuf, DiskVariant)> {
     directory_variants(dir).collect()
 }
