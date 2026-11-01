@@ -84,14 +84,18 @@ fn jpeg_xl_container_ignores_compressed_auxiliary_metadata() {
 #[test]
 fn jixel_lossless_preserves_every_rgba_sample_and_rejects_invalid_input() {
     use nova_image::{Error, JxlEncoding, encode_jxl};
-    for (width, height) in [(1, 1), (8, 6), (63, 17), (2, 300)] {
+    for (width, height) in [(1u32, 1u32), (8, 6), (63, 17), (2, 300)] {
         let pixels = (0..width * height)
             .flat_map(|i| {
                 [
                     (i * 31) as u8,
                     (i * 17) as u8,
                     (i * 7) as u8,
-                    if i % 5 == 0 { 0 } else { (i * 19) as u8 },
+                    if i.is_multiple_of(5) {
+                        0
+                    } else {
+                        (i * 19) as u8
+                    },
                 ]
             })
             .collect::<Vec<_>>();
