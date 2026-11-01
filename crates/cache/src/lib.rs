@@ -52,6 +52,11 @@ pub struct ImageRecipe {
     pub compress: bool,
     pub format: Option<CacheImageFormat>,
     pub quality: u8,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub jxl_lossless_jpeg: bool,
+}
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 impl ImageRecipe {
     pub fn resolve(image_use: impl Into<ImageUse>, settings: impl Into<CacheSettings>) -> Self {
@@ -66,6 +71,12 @@ impl ImageRecipe {
         Self {
             max_side,
             compress: settings.enabled,
+            jxl_lossless_jpeg: settings.enabled
+                && settings.jxl_lossless_jpeg
+                && matches!(
+                    settings.format,
+                    CacheImageFormat::JxlLossless | CacheImageFormat::JxlLossy
+                ),
             format: settings.enabled.then_some(settings.format),
             quality: if settings.enabled {
                 if settings.format == CacheImageFormat::Avif {
@@ -427,9 +438,21 @@ fn process_source_with(
     encoder: impl FnOnce(&image::RgbaImage, ImageRecipe) -> Option<Vec<u8>>,
 ) -> Option<Processed> {
     let source = decode_source(&bytes).ok()?;
+    let transcode = if recipe.jxl_lossless_jpeg
+        && recipe
+            .max_side
+            .is_none_or(|side| source.width().max(source.height()) <= side)
+    {
+        let _permit = EncodingPermit::acquire();
+        nova_image::transcode_jpeg_to_jxl(&bytes, nova_image::DecodeLimits::default()).ok()
+    } else {
+        None
+    };
     let resized = fit_source(source, recipe.max_side)?;
     let rgba = resized.into_rgba8();
-    let encoded = if !recipe.compress && recipe.max_side.is_none() {
+    let encoded = if transcode.is_some() {
+        transcode
+    } else if !recipe.compress && recipe.max_side.is_none() {
         Some(bytes)
     } else {
         drop(bytes);

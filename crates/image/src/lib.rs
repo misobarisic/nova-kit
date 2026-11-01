@@ -5,7 +5,7 @@ pub use avif::{decode as decode_avif, inspect as inspect_avif};
 mod jxl;
 pub use jxl::{decode as decode_jxl, inspect as inspect_jxl, is_jpeg_xl};
 mod jxl_encode;
-pub use jxl_encode::{JxlEncoding, encode_jxl};
+pub use jxl_encode::{JxlEncoding, encode_jxl, transcode_jpeg_to_jxl};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

@@ -1927,3 +1927,68 @@ fn jxl_recipes_keep_quality_separate_and_reuse_processed_variants() {
     }
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn jpeg_transcode_is_opt_in_and_skipped_for_resizing_or_non_jpeg() {
+    let source = image::RgbImage::from_fn(32, 24, |x, y| {
+        image::Rgb([(x * 7) as u8, (y * 9) as u8, ((x + y) * 4) as u8])
+    });
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 85)
+        .encode_image(&source)
+        .unwrap();
+    let settings = CacheSettings {
+        enabled: true,
+        format: CacheImageFormat::JxlLossy,
+        jxl_quality: 35,
+        jxl_lossless_jpeg: true,
+        ..CacheSettings::default()
+    };
+    let recipe = ImageRecipe::resolve(ImageUse::Fixed(None), &settings);
+    assert!(recipe.key().contains("jxl_lossless_jpeg"));
+    let result = process_source(jpeg.clone(), recipe)
+        .unwrap()
+        .encoded
+        .unwrap();
+    assert_eq!(
+        result,
+        nova_image::transcode_jpeg_to_jxl(&jpeg, nova_image::DecodeLimits::default()).unwrap()
+    );
+    let resized = process_source(
+        jpeg.clone(),
+        ImageRecipe {
+            max_side: Some(16),
+            ..recipe
+        },
+    )
+    .unwrap();
+    assert_eq!((resized.pixels.width(), resized.pixels.height()), (16, 12));
+    let normal = process_source(
+        jpeg,
+        ImageRecipe {
+            jxl_lossless_jpeg: false,
+            ..recipe
+        },
+    )
+    .unwrap()
+    .encoded
+    .unwrap();
+    assert_ne!(result, normal);
+    assert!(
+        !ImageRecipe {
+            jxl_lossless_jpeg: false,
+            ..recipe
+        }
+        .key()
+        .contains("jxl_lossless_jpeg")
+    );
+    let png = image::RgbaImage::from_pixel(3, 2, image::Rgba([40, 80, 120, 127]));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    png.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    assert!(
+        process_source(bytes.into_inner(), recipe)
+            .unwrap()
+            .encoded
+            .is_some()
+    );
+}

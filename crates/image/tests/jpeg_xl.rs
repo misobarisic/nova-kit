@@ -200,3 +200,44 @@ fn jixel_lossy_quality_changes_output_and_preserves_alpha() {
         results.iter().map(|r| r.1).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn jpeg_bitstream_transcode_reconstructs_original_bytes_and_checks_admission() {
+    use nova_image::{DecodeLimits, transcode_jpeg_to_jxl};
+    let pixels: Vec<u8> = (0..32 * 24 * 3).map(|i| (i * 37) as u8).collect();
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 81)
+        .encode(&pixels, 32, 24, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    let limits = DecodeLimits::default();
+    let encoded = transcode_jpeg_to_jxl(&jpeg, limits).unwrap();
+    let image = jxl_oxide::JxlImage::builder()
+        .read(std::io::Cursor::new(&encoded))
+        .unwrap();
+    let mut reconstructed = Vec::new();
+    image.reconstruct_jpeg(&mut reconstructed).unwrap();
+    assert_eq!(reconstructed, jpeg);
+    assert_eq!(
+        nova_image::decode_jxl(&encoded, limits)
+            .unwrap()
+            .dimensions(),
+        (32, 24)
+    );
+    for limits in [
+        DecodeLimits {
+            max_width: 31,
+            ..limits
+        },
+        DecodeLimits {
+            max_pixels: 700,
+            ..limits
+        },
+        DecodeLimits {
+            max_encoded_bytes: 10,
+            ..limits
+        },
+    ] {
+        assert!(transcode_jpeg_to_jxl(&jpeg, limits).is_err());
+    }
+    assert!(transcode_jpeg_to_jxl(&[0xff, 0xd8, 0xff, 0xd9], limits).is_err());
+}

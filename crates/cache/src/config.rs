@@ -38,6 +38,7 @@ pub struct CacheSettings {
     pub quality: u8,
     pub avif_quality: u8,
     pub jxl_quality: u8,
+    pub jxl_lossless_jpeg: bool,
     pub detail_poster_max_side: Option<u32>,
     pub detail_backdrop_max_side: Option<u32>,
     pub episode_thumbnail_max_side: Option<u32>,
@@ -75,6 +76,7 @@ impl Default for CacheSettings {
             quality: default_cache_image_quality(),
             avif_quality: default_avif_quality(),
             jxl_quality: default_jxl_quality(),
+            jxl_lossless_jpeg: false,
             detail_poster_max_side: Some(480),
             detail_backdrop_max_side: Some(960),
             episode_thumbnail_max_side: Some(360),
@@ -86,6 +88,20 @@ impl Default for CacheSettings {
 impl CacheSettings {
     /// Encoding summary for compatibility with callers displaying the configuration.
     pub fn config_key(&self) -> String {
+        let key = self.encoding_key();
+        if self.enabled
+            && self.jxl_lossless_jpeg
+            && matches!(
+                self.format,
+                CacheImageFormat::JxlLossless | CacheImageFormat::JxlLossy
+            )
+        {
+            format!("{key}:jpeg_lossless")
+        } else {
+            key
+        }
+    }
+    fn encoding_key(&self) -> String {
         let format = match self.format {
             CacheImageFormat::Jpeg => "jpeg",
             CacheImageFormat::Webp => "webp",
@@ -125,6 +141,7 @@ impl<'de> Deserialize<'de> for CacheSettings {
             quality: u8,
             avif_quality: u8,
             jxl_quality: u8,
+            jxl_lossless_jpeg: bool,
             detail_poster_max_side: Option<u32>,
             detail_backdrop_max_side: Option<u32>,
             episode_thumbnail_max_side: Option<u32>,
@@ -140,6 +157,7 @@ impl<'de> Deserialize<'de> for CacheSettings {
             quality: w.quality,
             avif_quality: w.avif_quality,
             jxl_quality: w.jxl_quality,
+            jxl_lossless_jpeg: w.jxl_lossless_jpeg,
             detail_poster_max_side: w.detail_poster_max_side,
             detail_backdrop_max_side: w.detail_backdrop_max_side,
             episode_thumbnail_max_side: w.episode_thumbnail_max_side,
@@ -229,6 +247,7 @@ pub fn set_cache_settings(settings: CacheSettings) {
         || current.quality != settings.quality
         || current.avif_quality != settings.avif_quality
         || current.jxl_quality != settings.jxl_quality
+        || current.jxl_lossless_jpeg != settings.jxl_lossless_jpeg
         || current.detail_poster_max_side != settings.detail_poster_max_side
         || current.detail_backdrop_max_side != settings.detail_backdrop_max_side
         || current.episode_thumbnail_max_side != settings.episode_thumbnail_max_side

@@ -14,6 +14,7 @@ fn recipe() -> ImageRecipe {
         compress: false,
         format: None,
         quality: 0,
+        jxl_lossless_jpeg: false,
     }
 }
 

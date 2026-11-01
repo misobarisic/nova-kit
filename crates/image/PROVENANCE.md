@@ -69,3 +69,12 @@ Dimension/pixel/RGBA input and final output caps are enforced before/after the
 codec; encoder working memory is additional. Local interop tests validate native
 pixels, alpha, quality behavior and malformed/low-limit input, not comparative
 compression ratios or device performance against libjxl.
+
+
+`transcode_jpeg_to_jxl` uses jixel's reversible JPEG coefficient path and retains
+JPEG reconstruction boxes. It checks encoded size and dimensions before
+transcoding and admits only the shared still-image decoder's supported subset.
+The cache's opt-in `jxl_lossless_jpeg` defaults to false and applies only to JPEG
+inputs that do not require resizing. Unsupported JPEGs and other images use the
+selected normal encoder/quality. The false recipe omits the new field, preserving
+existing keys. Tests reconstruct the original JPEG byte for byte using jxl-oxide.

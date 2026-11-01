@@ -166,3 +166,12 @@ encoder transient working memory is additional, as with AVIF. Decoder still-page
 limits and unsupported metadata/color layouts are documented in
 [codec provenance](crates/image/PROVENANCE.md). `nova-cache` can decode JPEG XL
 sources and store either JPEG XL mode with an independent quality preference.
+
+
+`transcode_jpeg_to_jxl` uses jixel's reversible JPEG coefficient path and retains
+JPEG reconstruction boxes. It checks encoded size and dimensions before
+transcoding and admits only the shared still-image decoder's supported subset.
+The cache's opt-in `jxl_lossless_jpeg` defaults to false and applies only to JPEG
+inputs that do not require resizing. Unsupported JPEGs and other images use the
+selected normal encoder/quality. The false recipe omits the new field, preserving
+existing keys. Tests reconstruct the original JPEG byte for byte using jxl-oxide.

@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-image = { version = "0.25.10", default-features = false }
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 thiserror = "2"
 avif-parse = "=2.1.0"
 rav1d = { package = "ferri-pdf-rav1d", path = "../../vendor/ferri-pdf-rav1d", default-features = false, features = ["bitdepth_8"] }
