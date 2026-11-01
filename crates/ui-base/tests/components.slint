@@ -10,6 +10,7 @@ import { ScrollView } from "@NovaUiBase/scrollview.slint";
 import { SearchField } from "@NovaUiBase/searchfield.slint";
 import { PillButton, ToggleSwitch, AddonIconButton, AddonRowCard, MiniSlider, Segmented, SectionHeader, ValueBox, SettingsLink, SettingsCard, SettingsBackButton, SettingsHeader, SettingsInput } from "@NovaUiBase/settings-controls.slint";
 import { SliderTouchArea } from "@NovaUiBase/slider-touch.slint";
+import { NumericSetting, CacheDiskToggle, CacheDiskLimit, CacheCompressionToggle, CacheFormatControl, CacheQualityControl, CacheResolutionControl, CacheMemoryControl, CacheClearControl } from "@NovaUiBase/cache-settings-controls.slint";
 export component ComponentsSmoke inherits Window {
     VerticalLayout {
         PillButton { label: "Save"; }
@@ -20,5 +21,14 @@ export component ComponentsSmoke inherits Window {
         LibraryFilterChip { label: "All"; }
         SettingsCard {}
         MenuSheet {}
+        NumericSetting { minimum: 1; maximum: 100; value: 85; }
+        CacheDiskToggle {}
+        CacheDiskLimit { model: ["Unlimited", "1024 MiB"]; keyboard-input-enabled: true; }
+        CacheCompressionToggle {}
+        CacheFormatControl { labels: ["JPEG", "WebP"]; }
+        CacheQualityControl { value: 85; }
+        CacheResolutionControl { model: ["Original", "480"]; }
+        CacheMemoryControl { value: 128; }
+        CacheClearControl {}
     }
 }

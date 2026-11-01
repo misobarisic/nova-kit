@@ -470,6 +470,7 @@ export component Segmented inherits HorizontalLayout {
         accessible-enabled: root.enabled && i != root.disabled_index;
         accessible-checkable: true;
         accessible-checked: root.current_index == i;
+        accessible-action-default => { if root.enabled && i != root.disabled_index { root.picked(i); } }
         width: seg_lbl.preferred-width + 28px;
         height: InterfaceStyle.tv ? 56px : 44px;
         border-radius: Math.min(Theme.button_corner_radius, Math.min(self.width, self.height) / 2);

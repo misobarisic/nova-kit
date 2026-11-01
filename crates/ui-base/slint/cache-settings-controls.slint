@@ -1,0 +1,85 @@
+// Extracted from Nova b69a1e5765ecc65ac3b00acdfe2f16e2f46a5dda:
+// crates/ui/settings-controls.slint (NumericSetting) and
+// crates/ui-settings-image-cache/image-cache-module.slint (cache controls).
+// Hosts retain their SettingsRow/search/sync wrappers and persistence callbacks.
+// The control geometry, ranges and enablement rules are shared here.
+import { InterfaceStyle } from "@NovaUiShared";
+import { PillButton, MiniSlider, ValueBox, ToggleSwitch, Segmented } from "settings-controls.slint";
+import { Dropdown } from "dropdown.slint";
+
+export component NumericSetting inherits Rectangle {
+    in-out property <float> value;
+    in property <float> minimum;
+    in property <float> maximum;
+    in property <float> step: 1;
+    in property <string> suffix: "";
+    in property <bool> enabled: true;
+    in property <bool> focused: false;
+    in property <string> name: "";
+    in property <string> decrease-label: @tr("Decrease value");
+    in property <string> increase-label: @tr("Increase value");
+    callback changed(float);
+    preferred-width: InterfaceStyle.tv ? 320px : 252px; min-width: 0px; height: InterfaceStyle.tv ? 56px : 44px;
+    // Measure the actual formatted value so units and larger numbers fit.
+    numeric_value_measure := Text { text: Math.round(root.value) + root.suffix; font-size: 20px; visible: false; }
+    HorizontalLayout {
+        spacing: 4px;
+        PillButton {
+            accessible-label: root.decrease-label;
+            accessible-action-default => { if self.enabled { self.clicked(); } }
+            label: "−"; enabled: root.enabled && root.value > root.minimum; compact: true; btn_min_width: 44px;
+            clicked => { root.value = Math.max(root.minimum, root.value - root.step); root.changed(root.value); } }
+        MiniSlider { name: root.name; min-width: 36px; horizontal-stretch: 1; enabled: root.enabled; focused: root.focused;
+            value <=> root.value; minimum: root.minimum; maximum: root.maximum; step: root.step;
+            changed(v) => { root.changed(v); } }
+        ValueBox { width: InterfaceStyle.tv ? Math.max(64px, numeric_value_measure.preferred-width + 24px) : root.suffix == "" ? 36px : 68px; height: InterfaceStyle.tv ? 56px : 44px; text: Math.round(root.value) + root.suffix; }
+        PillButton {
+            accessible-label: root.increase-label;
+            accessible-action-default => { if self.enabled { self.clicked(); } }
+            label: "+"; enabled: root.enabled && root.value < root.maximum; compact: true; btn_min_width: 44px;
+            clicked => { root.value = Math.min(root.maximum, root.value + root.step); root.changed(root.value); } }
+    }
+}
+
+// Disk storage is independent of decoded memory and explicit download storage.
+export component CacheDiskToggle inherits ToggleSwitch {
+    in property <bool> busy: false;
+    name: @tr("Disk caching"); enabled: !root.busy;
+    accessible-action-default => { if root.enabled { root.checked = !root.checked; root.toggled(); } }
+}
+export component CacheDiskLimit inherits Dropdown {
+    in property <bool> disk-enabled: true;
+    in property <bool> busy: false;
+    width: 100%; roomy: true; enabled: root.disk-enabled && !root.busy;
+}
+export component CacheCompressionToggle inherits ToggleSwitch {
+    in property <bool> disk-enabled: true;
+    in property <bool> busy: false;
+    name: @tr("Compress images"); enabled: root.disk-enabled && !root.busy;
+    accessible-action-default => { if root.enabled { root.checked = !root.checked; root.toggled(); } }
+}
+export component CacheFormatControl inherits Segmented {
+    in property <bool> disk-enabled: true;
+    in property <bool> compression-enabled: true;
+    in property <bool> busy: false;
+    enabled: root.disk-enabled && root.compression-enabled && !root.busy;
+}
+export component CacheQualityControl inherits NumericSetting {
+    in property <bool> disk-enabled: true;
+    in property <bool> compression-enabled: true;
+    in property <bool> busy: false;
+    minimum: 1; maximum: 100; step: 1;
+    enabled: root.disk-enabled && root.compression-enabled && !root.busy;
+}
+export component CacheResolutionControl inherits Dropdown {
+    in property <bool> busy: false;
+    roomy: true; enabled: !root.busy;
+}
+export component CacheMemoryControl inherits NumericSetting {
+    minimum: 32; maximum: 512; step: 16; suffix: " MB";
+}
+export component CacheClearControl inherits PillButton {
+    in property <bool> busy: false;
+    label: @tr("Clear cache"); destructive: true; enabled: !root.busy;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+}

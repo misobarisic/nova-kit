@@ -30,6 +30,8 @@ export component Dropdown inherits Rectangle {
     in-out property <int> current-index: -1;
     in property <string> placeholder-text: "";
     in property <bool> enabled: true;
+    in property <bool> keyboard-input-enabled: InterfaceStyle.tv;
+    in property <string> name: "";
     in property <bool> roomy: false;
     in property <bool> pill: false;
     // Page-level catalog selectors use the same navy surface and rounded
@@ -47,16 +49,16 @@ export component Dropdown inherits Rectangle {
 
     property <length> item-h: InterfaceStyle.tv ? 56px : root.roomy ? 44px : 32px;
     property <int> popup-index: 0;
-    function open_popup() {
+    public function open_popup() {
         root.opened();
         root.popup-index = Math.max(0, root.current-index);
         popup.show();
     }
     forward-focus: closed_scope;
     closed_scope := FocusScope {
-        enabled: root.enabled && InterfaceStyle.tv;
+        enabled: root.enabled && root.keyboard-input-enabled;
         key-pressed(e) => {
-            if InterfaceStyle.tv && (e.text == Key.Return || e.text == " ") && root.model.length > 0 {
+            if root.keyboard-input-enabled && (e.text == Key.Return || e.text == " ") && root.model.length > 0 {
                 SettingsStyle.keyboard-mode = true;
                 if !e.repeat { root.open_popup(); }
                 accept
@@ -72,10 +74,14 @@ export component Dropdown inherits Rectangle {
     }
     property <string> shown-text: root.has_selection ? root.text_at(root.current-index) : root.placeholder-text;
 
+    accessible-role: button;
+    accessible-label: root.name == "" ? root.shown-text : root.name;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.open_popup(); } }
     height: root.item-h;
     border-radius: Math.min(Theme.button_corner_radius, Math.min(self.width, self.height) / 2);
-    border-width: InterfaceStyle.tv && closed_scope.has-focus ? 2px : 1px;
-    border-color: InterfaceStyle.tv && closed_scope.has-focus ? Theme.current.focus_ring : Theme.current.control_border;
+    border-width: root.keyboard-input-enabled && closed_scope.has-focus ? 2px : 1px;
+    border-color: root.keyboard-input-enabled && closed_scope.has-focus ? Theme.current.focus_ring : Theme.current.control_border;
     hover_feedback := FeedbackProgress { active: touch.feedback-active && root.enabled; motion: Anim.enabled && Anim.hover; duration: Anim.hover_fast; }
     open_feedback := FeedbackProgress { active: popup.is-open; }
     background: root.prominent
@@ -173,16 +179,16 @@ export component Dropdown inherits Rectangle {
         popup_scope := FocusScope {
             width: 100%;
             height: 100%;
-            init => { self.focus(); if InterfaceStyle.tv { popup_scroll.content-y = -Math.max(0px, (root.popup-index + 1) * root.item-h - popup_scroll.visible-height); } }
+            init => { self.focus(); if root.keyboard-input-enabled { popup_scroll.content-y = -Math.max(0px, (root.popup-index + 1) * root.item-h - popup_scroll.visible-height); } }
             capture-key-pressed(e) => {
-                if (e.text == Key.Back || (InterfaceStyle.tv && e.text == Key.Escape)) {
-                    if (!e.repeat) { popup.close(); if InterfaceStyle.tv { closed_scope.focus(); } }
+                if (e.text == Key.Back || (root.keyboard-input-enabled && e.text == Key.Escape)) {
+                    if (!e.repeat) { popup.close(); if root.keyboard-input-enabled { closed_scope.focus(); } }
                     accept
-                } else if InterfaceStyle.tv && (e.text == Key.UpArrow || e.text == Key.DownArrow) {
+                } else if root.keyboard-input-enabled && (e.text == Key.UpArrow || e.text == Key.DownArrow) {
                     root.popup-index = Math.clamp(root.popup-index + (e.text == Key.UpArrow ? -1 : 1), 0, root.model.length - 1);
                     popup_scroll.content-y = -Math.max(0px, (root.popup-index + 1) * root.item-h - popup_scroll.visible-height);
                     accept
-                } else if InterfaceStyle.tv && (e.text == Key.Return || e.text == " ") {
+                } else if root.keyboard-input-enabled && (e.text == Key.Return || e.text == " ") {
                     if !e.repeat && root.popup-index < root.model.length {
                         root.current-index = root.popup-index;
                         root.selected(root.model[root.popup-index]);
@@ -223,8 +229,19 @@ export component Dropdown inherits Rectangle {
                         for value[index] in root.model: Rectangle {
                             width: 100%;
                             height: root.item-h;
+                            accessible-role: button;
+                            accessible-label: root.text_at(index);
+                            accessible-enabled: root.enabled;
+                            accessible-action-default => {
+                                if root.enabled {
+                                    root.current-index = index;
+                                    root.selected(value);
+                                    popup.close();
+                                    closed_scope.focus();
+                                }
+                            }
                             border-radius: root.prominent ? 10px : 4px;
-                            border-width: InterfaceStyle.tv && index == root.popup-index ? 2px : 0px;
+                            border-width: root.keyboard-input-enabled && index == root.popup-index ? 2px : 0px;
                             border-color: Theme.current.focus_ring;
                             row_hover := FeedbackProgress { active: item_touch.feedback-active; motion: Anim.enabled && Anim.hover; duration: Anim.hover_fast; }
                             row_selection := FeedbackProgress { active: index == root.current-index; }

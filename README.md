@@ -8,6 +8,7 @@ Shared Rust crates for the Nova applications, under GPL-3.0-or-later.
 | `addons` | Stremio addon URL builders, protocol types and response parsing, with an optional blocking HTTP client |
 | `nova-download` | Existing download jobs, HTTP resume, finite HLS bundles, cancellation, filesystem capacity and offline budgeting |
 | `nova-ui-base` | Slint source components, theme/animation tokens and associated assets |
+| `nova-cache` | Nova's processed image variants, decoded LRU, atomic encoded-page cache, batched usage index and incremental grouped eviction |
 
 Storage was extracted from Nova commit
 `7a0cb47d0977fdb64601af4f37a6e7d53b6f5e45`. Addons, downloads and UI components
@@ -44,8 +45,38 @@ Nova's compiler extension reads that metadata for source-only imports, including
 inline Slint fixtures. No second compiled global bundle is introduced.
 
 App pages, navigation routing, domain models and Settings bridges remain in Nova.
-Its old component paths are compatibility imports. App-specific SettingsRow,
-SettingsSearchHighlight and NumericSetting remain in Nova's settings-controls.
+Its old component paths are compatibility imports. App-specific SettingsRow
+and SettingsSearchHighlight remain in Nova's settings-controls.
+The shared `cache-settings-controls.slint` now contains Nova's actual numeric
+and cache controls; app-specific settings rows, search highlighting and
+persistence bridges remain application adapters.
+
+## Image and chapter caches
+
+`nova-cache` relocates the actual image cache from Nova revision
+`b69a1e5765ecc65ac3b00acdfe2f16e2f46a5dda`; its original behavior tests and
+file format move with it. See [provenance and adapter changes](crates/cache/PROVENANCE.md).
+Applications install paths/transport with `config::configure` and publish only
+the image-related `config::CacheSettings` subset. Profile and video settings
+remain app-owned. Existing processed-poster functions retain their names.
+
+`DecodedCache` provides independently budgeted pixel LRUs, protected-key
+priority, recency queries and eviction reports. `blob::Cache` stores bounded
+encoded bytes using the same atomic variant container and usage/GC index;
+the application supplies validation and optional transforms. No resizing or
+decoding happens in the blob path, so native-resolution chapter pages and
+application-specific codecs remain intact. `get` plus `generation` and
+`put_if_current` support displaying original bytes before background encoding;
+an existing valid entry is never overwritten by that conditional publication.
+
+Retain a `gc::Worker` from `gc::start(directory, backend)` through orderly
+shutdown. `Backend::policy` supplies per-directory disk enable/budget settings;
+`eviction_group` makes all pages of a chapter one eviction unit. `Cache::pin`
+leases and backend protected keys protect whole groups, including synthetic
+active-group markers. Keep chapters and artwork in separate directories with
+separate budgets to preserve plentiful small posters when chapter pages turn
+over. `touch` and decoded hits update usage in memory; persistence is batched.
+Do not point cache roots at durable downloads or imported original files.
 
 ## Development
 
@@ -82,7 +113,7 @@ cargo dev-release      # optimized build
 cargo dev-release-run  # optimized build and run
 ```
 
-The ignored config patches all four kit packages. Ordinary Cargo commands and
+The ignored config patches the Kit packages. Ordinary Cargo commands and
 CI use the pinned Git dependencies once the extraction is published. No global
 Cargo configuration is needed. Local patches can change Nova's lockfile; keep
 those changes out of commits and restore its Git-based lockfile for normal
