@@ -11,6 +11,10 @@ pub enum CacheImageFormat {
     Jpeg,
     Webp,
     Avif,
+    #[serde(rename = "jxl_lossless")]
+    JxlLossless,
+    #[serde(rename = "jxl_lossy")]
+    JxlLossy,
 }
 
 impl CacheImageFormat {
@@ -19,6 +23,8 @@ impl CacheImageFormat {
             CacheImageFormat::Jpeg => "JPEG",
             CacheImageFormat::Webp => "WebP",
             CacheImageFormat::Avif => "AVIF",
+            CacheImageFormat::JxlLossless => "JPEG XL (lossless)",
+            CacheImageFormat::JxlLossy => "JPEG XL (lossy)",
         }
     }
 }
@@ -31,6 +37,7 @@ pub struct CacheSettings {
     pub format: CacheImageFormat,
     pub quality: u8,
     pub avif_quality: u8,
+    pub jxl_quality: u8,
     pub detail_poster_max_side: Option<u32>,
     pub detail_backdrop_max_side: Option<u32>,
     pub episode_thumbnail_max_side: Option<u32>,
@@ -52,6 +59,9 @@ pub const fn default_cache_image_format() -> CacheImageFormat {
 pub const fn default_avif_quality() -> u8 {
     85
 }
+pub const fn default_jxl_quality() -> u8 {
+    85
+}
 pub const fn default_cache_image_quality() -> u8 {
     50
 }
@@ -64,6 +74,7 @@ impl Default for CacheSettings {
             format: default_cache_image_format(),
             quality: default_cache_image_quality(),
             avif_quality: default_avif_quality(),
+            jxl_quality: default_jxl_quality(),
             detail_poster_max_side: Some(480),
             detail_backdrop_max_side: Some(960),
             episode_thumbnail_max_side: Some(360),
@@ -79,11 +90,15 @@ impl CacheSettings {
             CacheImageFormat::Jpeg => "jpeg",
             CacheImageFormat::Webp => "webp",
             CacheImageFormat::Avif => "avif",
+            CacheImageFormat::JxlLossless => return "jxl_lossless".into(),
+            CacheImageFormat::JxlLossy => "jxl_lossy",
         };
         format!(
             "{format}:q{}",
             if self.format == CacheImageFormat::Avif {
                 self.avif_quality
+            } else if self.format == CacheImageFormat::JxlLossy {
+                self.jxl_quality
             } else {
                 self.quality
             }
@@ -109,6 +124,7 @@ impl<'de> Deserialize<'de> for CacheSettings {
             format: CacheImageFormat,
             quality: u8,
             avif_quality: u8,
+            jxl_quality: u8,
             detail_poster_max_side: Option<u32>,
             detail_backdrop_max_side: Option<u32>,
             episode_thumbnail_max_side: Option<u32>,
@@ -123,6 +139,7 @@ impl<'de> Deserialize<'de> for CacheSettings {
             format: w.format,
             quality: w.quality,
             avif_quality: w.avif_quality,
+            jxl_quality: w.jxl_quality,
             detail_poster_max_side: w.detail_poster_max_side,
             detail_backdrop_max_side: w.detail_backdrop_max_side,
             episode_thumbnail_max_side: w.episode_thumbnail_max_side,
@@ -168,6 +185,13 @@ pub fn normalize_image_settings(
             return Err(format!("invalid image resolution for {key}"));
         }
     }
+    if let Some(value) = object.get("jxl_quality")
+        && !value
+            .as_u64()
+            .is_some_and(|quality| (1..=100).contains(&quality))
+    {
+        return Err("invalid JPEG XL quality".into());
+    }
     Ok(())
 }
 static CURRENT_CACHE_SETTINGS: LazyLock<Mutex<CacheSettings>> =
@@ -204,6 +228,7 @@ pub fn set_cache_settings(settings: CacheSettings) {
         || current.format != settings.format
         || current.quality != settings.quality
         || current.avif_quality != settings.avif_quality
+        || current.jxl_quality != settings.jxl_quality
         || current.detail_poster_max_side != settings.detail_poster_max_side
         || current.detail_backdrop_max_side != settings.detail_backdrop_max_side
         || current.episode_thumbnail_max_side != settings.episode_thumbnail_max_side

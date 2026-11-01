@@ -70,6 +70,10 @@ impl ImageRecipe {
             quality: if settings.enabled {
                 if settings.format == CacheImageFormat::Avif {
                     settings.avif_quality.clamp(1, 100)
+                } else if settings.format == CacheImageFormat::JxlLossless {
+                    0
+                } else if settings.format == CacheImageFormat::JxlLossy {
+                    settings.jxl_quality.clamp(1, 100)
                 } else {
                     settings.quality.clamp(1, 100)
                 }
@@ -275,7 +279,12 @@ pub fn decode_image_bytes(
 fn decode_source(
     bytes: &[u8],
 ) -> Result<image::DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
-    if image::guess_format(bytes).is_ok_and(|format| format == image::ImageFormat::Avif) {
+    if nova_image::is_jpeg_xl(bytes) {
+        Ok(image::DynamicImage::ImageRgba8(nova_image::decode_jxl(
+            bytes,
+            nova_image::DecodeLimits::default(),
+        )?))
+    } else if image::guess_format(bytes).is_ok_and(|format| format == image::ImageFormat::Avif) {
         Ok(image::DynamicImage::ImageRgba8(nova_image::decode_avif(
             bytes,
             nova_image::DecodeLimits::default(),
@@ -358,6 +367,23 @@ fn encode_rgba(rgba: &image::RgbaImage, recipe: ImageRecipe) -> Option<Vec<u8>> 
                 rgba.height(),
                 rgba.as_raw(),
                 recipe.quality,
+                nova_image::DecodeLimits::default(),
+            )
+            .ok()?;
+        }
+        Some(CacheImageFormat::JxlLossless | CacheImageFormat::JxlLossy) => {
+            let mode = if recipe.format == Some(CacheImageFormat::JxlLossless) {
+                nova_image::JxlEncoding::Lossless
+            } else {
+                nova_image::JxlEncoding::Lossy {
+                    quality: recipe.quality,
+                }
+            };
+            bytes = nova_image::encode_jxl(
+                rgba.width(),
+                rgba.height(),
+                rgba.as_raw(),
+                mode,
                 nova_image::DecodeLimits::default(),
             )
             .ok()?;

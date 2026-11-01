@@ -12,3 +12,7 @@ avif-parse = "=2.1.0"
 rav1d = { package = "ferri-pdf-rav1d", path = "../../vendor/ferri-pdf-rav1d", default-features = false, features = ["bitdepth_8"] }
 yuv = { version = "=0.8.19", default-features = false }
 ravif = { version = "=0.13.0", default-features = false }
+jxl-oxide = { version = "=0.12.6", default-features = false }
+jxl-bitstream = { version = "=1.1.0", default-features = false }
+jxl-oxide-common = { version = "=1.0.0", default-features = false }
+jixel = { version = "=0.5.2", default-features = false }

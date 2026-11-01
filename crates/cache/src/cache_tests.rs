@@ -1878,3 +1878,52 @@ fn stale_follower_registration_waiting_for_url_lock_cannot_reclaim_newer_use() {
     assert_eq!(disk_variants(&dir).len(), 2);
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn jxl_recipes_keep_quality_separate_and_reuse_processed_variants() {
+    let _serial = serial();
+    let dir = scratch("jxl-shared-codec");
+    for format in [CacheImageFormat::JxlLossless, CacheImageFormat::JxlLossy] {
+        let settings = CacheSettings {
+            format,
+            jxl_quality: 91,
+            quality: 37,
+            avif_quality: 62,
+            ..settings()
+        };
+        let url = format!("https://unit.test/{format:?}");
+        let recipe = ImageRecipe::resolve(ImageUse::Fixed(None), &settings);
+        assert_eq!(
+            recipe.quality,
+            if format == CacheImageFormat::JxlLossless {
+                0
+            } else {
+                91
+            }
+        );
+        let cold = cached_pixels_with(&dir, &url, ImageUse::Fixed(None), &settings, || {
+            Some(source_image(32, 48, true))
+        })
+        .unwrap();
+        let variant = read_variant(&recipe_disk_path(&dir, &url, recipe)).unwrap();
+        assert!(nova_image::is_jpeg_xl(&variant.encoded));
+        decoded_cache_clear();
+        let disk = cached_pixels_with(&dir, &url, ImageUse::Fixed(None), &settings, || {
+            panic!("shared JPEG XL disk hit")
+        })
+        .unwrap();
+        assert!(image_buffers_equal(&cold, &disk));
+        let source =
+            nova_image::decode_jxl(&variant.encoded, nova_image::DecodeLimits::default()).unwrap();
+        assert_eq!(source.dimensions(), (32, 48));
+    }
+    let old: CacheSettings = serde_json::from_str(r#"{"format":"webp","quality":50}"#).unwrap();
+    assert_eq!(old.jxl_quality, 85);
+    for quality in [0, 101] {
+        assert!(
+            serde_json::from_value::<CacheSettings>(serde_json::json!({"jxl_quality":quality}))
+                .is_err()
+        );
+    }
+    fs::remove_dir_all(dir).unwrap();
+}

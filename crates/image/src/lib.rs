@@ -1,7 +1,11 @@
-//! Actual Reader portable 8-bit AVIF codec, shared without platform/native codecs.
+//! Shared bounded AVIF and JPEG XL still-image codecs, without native codecs.
 //! See PROVENANCE.md and AVIF-NOTICE.txt for source and BSD attribution.
 mod avif;
 pub use avif::{decode as decode_avif, inspect as inspect_avif};
+mod jxl;
+pub use jxl::{decode as decode_jxl, inspect as inspect_jxl, is_jpeg_xl};
+mod jxl_encode;
+pub use jxl_encode::{JxlEncoding, encode_jxl};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -9,6 +13,8 @@ pub enum Error {
     Limit,
     #[error("AVIF: {0}")]
     Avif(String),
+    #[error("JPEG XL: {0}")]
+    Jxl(String),
 }
 pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

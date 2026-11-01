@@ -9,7 +9,7 @@ Shared Rust crates for the Nova applications, under GPL-3.0-or-later.
 | `nova-download` | Existing download jobs, HTTP resume, finite HLS bundles, cancellation, filesystem capacity and offline budgeting |
 | `nova-ui-base` | Slint source components, theme/animation tokens and associated assets |
 | `nova-cache` | Nova's processed image variants, decoded LRU, atomic encoded-page cache, batched usage index and incremental grouped eviction |
-| `nova-image` | Reader's actual bounded portable eight-bit AVIF still decoder and RGBA encoder, shared by Nova and Reader |
+| `nova-image` | Shared bounded AVIF/JPEG XL still decoders and RGBA encoders, shared by Nova and Reader |
 
 Storage was extracted from Nova commit
 `7a0cb47d0977fdb64601af4f37a6e7d53b6f5e45`. Addons, downloads and UI components
@@ -153,3 +153,16 @@ CI use the pinned Git dependencies once the extraction is published. No global
 Cargo configuration is needed. Local patches can change Nova's lockfile; keep
 those changes out of commits and restore its Git-based lockfile for normal
 `--locked` CI commands. An initial Git resolution may still need network access.
+
+
+## JPEG XL
+
+`nova-image` exposes `is_jpeg_xl`, `inspect_jxl`, `decode_jxl` and `encode_jxl`.
+Decoding uses Reader's actual jxl-oxide 0.12.6 adapter. Encoding uses jixel 0.5.2,
+with explicit `JxlEncoding::Lossless` or `JxlEncoding::Lossy { quality }` (1–100).
+Both are pure Rust and single-threaded; native libjxl and SIMD/experimental encoder
+features are disabled. Lossy alpha stays lossless. Input/output bounds are checked;
+encoder transient working memory is additional, as with AVIF. Decoder still-page
+limits and unsupported metadata/color layouts are documented in
+[codec provenance](crates/image/PROVENANCE.md). `nova-cache` can decode JPEG XL
+sources and store either JPEG XL mode with an independent quality preference.

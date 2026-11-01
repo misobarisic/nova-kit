@@ -47,3 +47,25 @@ cargo check --locked -p nova-image --target armv7-linux-androideabi
 
 The leaf ARMv7 check uses stable Rust and the installed target standard library;
 it does not require an Android NDK, nightly Rust or bootstrap flags.
+
+
+## JPEG XL
+
+`src/jxl.rs` moves the actual Reader v0.1.17 decoder from commit
+`59b5000695f7b280ee22a1dd63dc1e76195c5b39`, retaining its dimension/encoded/grid
+limits, direct RGBA row conversion and auxiliary-box skipping. The existing
+synthetic RGB/alpha and boxed-metadata tests/fixtures move unchanged with it.
+The public magic probe is renamed `is_jpeg_xl`; Reader retains a thin adapter.
+Decoding uses jxl-oxide 0.12.6 (MIT OR Apache-2.0), with Rayon and native CMS off.
+Custom ICC, previews, animation, CMYK and extra channels remain unsupported.
+
+`src/jxl_encode.rs` adds eight-bit RGBA encoding using jixel 0.5.2
+(BSD-3-Clause OR Apache-2.0), a Rust implementation derived from libjxl-tiny.
+All default Cargo features are disabled: no platform SIMD, splines or extra-slow
+perceptual-metric dependencies. Configuration explicitly selects one thread,
+Fast effort, lossless alpha and preserved invisible RGB. `JxlEncoding` separates
+true lossless encoding from lossy quality (including lossy quality 100).
+Dimension/pixel/RGBA input and final output caps are enforced before/after the
+codec; encoder working memory is additional. Local interop tests validate native
+pixels, alpha, quality behavior and malformed/low-limit input, not comparative
+compression ratios or device performance against libjxl.
