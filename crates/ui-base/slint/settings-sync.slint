@@ -1,0 +1,67 @@
+import { Theme, SettingSyncInfo, SettingsSync } from "@NovaUiShared";
+
+
+
+// Values are supplied by the backend; status describes policy, not connectivity.
+
+
+export component SettingSyncBadge inherits Rectangle {
+    in property <string> setting_key;
+    in property <string> setting_title;
+    property <SettingSyncInfo> info: SettingsSync.rows[SettingsSync.lookup(root.setting_key)];
+    private property <bool> return_focus: false;
+    property <bool> owns_modal: SettingsSync.open && SettingsSync.selected_key == root.setting_key;
+    visible: SettingsSync.enabled;
+    changed owns_modal => {
+        if !self.owns_modal && root.return_focus {
+            root.return_focus = false;
+            if SettingsSync.enabled { badge_focus.focus(); }
+        }
+    }
+    property <int> status: self.info.status;
+    property <string> label: status == 1 ? @tr("Synced") : status == 2 ? @tr("This device (overridden)") : @tr("This device");
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-description: root.setting_title;
+    accessible-action-default => { root.return_focus = true; SettingsSync.show(root.setting_key, root.setting_title); }
+    accessible-id: "setting-scope:" + root.setting_key;
+    preferred-width: badge_text.preferred-width + 34px;
+    // Vertical layouts stretch their cross-axis even when stretch is zero.
+    // Keep the pill at its text width; callers also cap it to the available space.
+    max-width: self.preferred-width;
+    horizontal-stretch: 0;
+    height: 26px;
+    border-radius: 6px;
+    background: root.status == 1 ? Theme.current.scope_synced_fill : root.status == 2 ? Theme.current.scope_override_fill : Theme.current.scope_local_fill;
+    border-width: badge_focus.has-focus ? 1px : 0px;
+    border-color: Theme.current.focus_ring;
+    property <color> ink: root.status == 1 ? Theme.current.scope_synced_text : root.status == 2 ? Theme.current.scope_override_text : Theme.current.scope_local_text;
+    if root.status == 1: Path {
+        x: 7px; y: 6px; width: 15px; height: 14px;
+        viewbox-width: 24; viewbox-height: 24;
+        commands: "M6 18h12a4 4 0 0 0 0-8 6 6 0 0 0-11-2 5 5 0 0 0-1 10z";
+        stroke: root.ink; stroke-width: 2px; fill: transparent;
+    }
+    if root.status != 1: Path {
+        x: 8px; y: 5px; width: 12px; height: 16px;
+        viewbox-width: 16; viewbox-height: 22;
+        commands: "M4 1h8v20H4zM7 18h2";
+        stroke: root.ink; stroke-width: 1.5px; fill: transparent;
+    }
+    badge_text := Text {
+        x: 26px; y: 0px; width: Math.max(0px, root.width - 32px); height: 100%;
+        text: root.label; font-size: 11px; font-weight: 600;
+        color: root.ink; vertical-alignment: center; overflow: elide;
+    }
+    badge_focus := FocusScope {
+        key-pressed(e) => {
+            if e.text == Key.Return || e.text == " " {
+                root.return_focus = true; SettingsSync.show(root.setting_key, root.setting_title); accept
+            } else { reject }
+        }
+    }
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => { SettingsSync.show(root.setting_key, root.setting_title); }
+    }
+}

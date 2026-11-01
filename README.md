@@ -2,11 +2,13 @@
 
 Shared Rust crates for the Nova applications, under GPL-3.0-or-later.
 
-See the [sync extraction assessment](SYNC-PLAN.md) for the audited boundary and
-delivery plan for sharing Nova's sync engine and settings UI with Reader.
+See the [shared sync architecture](SYNC-PLAN.md) for the ownership boundary and
+consumer integration contracts.
 
 | Package | Responsibility |
 | --- | --- |
+| `nova-sync` | HLC record engine, durable snapshots, authenticated pairing/membership, package transport and optional Nova playback/progress policies |
+| `nova-playback-api` | Optional Nova video remote-control models; omitted by Reader |
 | `nova-storage` | redb JSON storage, atomic batches, collections, compressed metadata and durable sequences |
 | `addons` | Stremio addon URL builders, protocol types and response parsing, with an optional blocking HTTP client |
 | `nova-download` | Existing download jobs, HTTP resume, finite HLS bundles, cancellation, filesystem capacity and offline budgeting |
@@ -190,3 +192,17 @@ The cache's opt-in `jxl_lossless_jpeg` defaults to false and applies only to JPE
 inputs that do not require resizing. Unsupported JPEGs and other images use the
 selected normal encoder/quality. The false recipe omits the new field, preserving
 existing keys. Tests reconstruct the original JPEG byte for byte using jxl-oxide.
+
+## Cross-device sync
+
+`nova-sync` contains Nova's actual engine and tests, extracted at
+`c035d61af9b57e34b997b44e53a379652bf5654a`; see
+[provenance and compatibility boundaries](crates/sync/PROVENANCE.md).
+Nova's default features preserve its existing wire/storage behavior, watch
+registers and remote playback API. Reader uses `default-features = false`, then
+calls `configure_protocol(ProtocolConfig::reader())` before identity/store access
+and `configure_record_policy` before record access. Reader tickets use `NR1`
+and every Reader protocol uses the `nova-reader/` namespace. Namespace selection
+is immutable; unrelated app records cannot enter through Nova pairing tickets
+or ALPN negotiation. App adapters own domain identity, materialization, validation
+and installation consent; shared package transport never grants install consent.

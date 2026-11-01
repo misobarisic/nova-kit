@@ -1,0 +1,107 @@
+import { Anim, Theme, SettingsSync, SettingSyncInfo } from "@NovaUiShared";
+
+
+import { SettingSyncBadge } from "settings-sync.slint";
+
+import { PillButton } from "settings-controls.slint";
+import { ScrollView } from "scrollview.slint";
+
+export component SettingSyncModal inherits Rectangle {
+    in property <bool> narrow;
+    in property <length> safe-top;
+    in property <length> safe-bottom;
+    in property <length> safe-left;
+    in property <length> safe-right;
+    callback closed();
+    visible: SettingsSync.open;
+    width: 100%; height: 100%;
+    background: Theme.current.scrim_settings;
+    property <SettingSyncInfo> info: SettingsSync.rows[SettingsSync.lookup(SettingsSync.selected_key)];
+    property <int> action_index: 0;
+    property <bool> is_open: SettingsSync.open;
+    // Reset immediately while hidden so every phone opening starts below
+    // the viewport, including quick close/reopen taps.
+    property <float> open_progress: root.is_open ? 1 : 0;
+    animate open_progress { duration: root.is_open && root.narrow ? Anim.transition_slide : 0ms; easing: ease-out; }
+    changed is_open => { if self.is_open { root.action_index = 0; modal_focus.focus(); } }
+    function close() { SettingsSync.open = false; root.closed(); }
+    function activate() {
+        if root.info.can_override && root.info.status != 0 && root.action_index == 0 && (root.info.status != 2 || root.info.shared_supported) { SettingsSync.override_changed(SettingsSync.selected_key, root.info.status != 2); }
+        root.close();
+    }
+    modal_focus := FocusScope {
+        width: 100%; height: 100%;
+        key-pressed(e) => {
+            if e.text == Key.Escape || e.text == Key.Back || e.text == Key.Backspace { root.close(); accept }
+            else if e.text == Key.Return || e.text == " " { root.activate(); accept }
+            else if e.text == Key.UpArrow || e.text == Key.DownArrow { root.action_index = root.info.status == 2 ? 1 - root.action_index : 0; accept }
+            else if e.text == Key.LeftArrow || e.text == Key.RightArrow { accept }
+            else { reject }
+        }
+    }
+    TouchArea { width: 100%; height: 100%; clicked => { root.close(); } }
+    panel := Rectangle {
+        x: root.narrow ? root.safe-left : (root.width - self.width) / 2;
+        width: Math.max(1px, Math.min(root.width - root.safe-left - root.safe-right, root.narrow ? root.width : 480px));
+        height: Math.min(root.height - root.safe-top, content.preferred-height + 40px + root.safe-bottom);
+        y: root.narrow ? root.height - self.height * root.open_progress : (root.height - self.height) / 2;
+        background: Theme.current.card;
+        border-radius: 22px; border-width: 1px; border-color: Theme.current.border_medium;
+        TouchArea { width: 100%; height: 100%; clicked => { } }
+        ScrollView {
+            x: 20px; y: 20px; width: Math.max(1px, parent.width - 40px);
+            height: Math.max(1px, parent.height - 40px - root.safe-bottom);
+            content := VerticalLayout {
+                width: 100%; spacing: 14px;
+                Rectangle {
+                    height: 4px; width: 100%;
+                    grab_handle := Rectangle { x: (parent.width - self.width) / 2; height: 4px; width: 44px; border-radius: 2px; background: Theme.current.text_hint; }
+                }
+                HorizontalLayout {
+                    Text { text: @tr("Sync status"); font-size: 24px; font-weight: 700; color: Theme.current.text_bright; min-width: 0px; wrap: word-wrap; }
+                    PillButton { label: "×"; btn_min_width: 44px; compact: true; clicked => { root.close(); } }
+                }
+                Text { text: SettingsSync.selected_title; font-size: 16px; font-weight: 600; color: Theme.current.text_bright; wrap: word-wrap; }
+                SettingSyncBadge { max-width: Math.min(self.preferred-width, content.width); setting_key: SettingsSync.selected_key; setting_title: SettingsSync.selected_title; }
+                Rectangle { height: 1px; background: Theme.current.border_subtle; }
+                Text { text: @tr("Value on this device"); font-size: 13px; color: Theme.current.text_settings; }
+                // Folder values can contain an unbroken filename: keep the
+                // scroll document constrained to the comparison panel.
+                Text { text: root.info.local_value; font-size: 16px; color: Theme.current.text_bright; wrap: word-wrap; min-width: 0px; }
+                if root.info.status != 0: Text { text: @tr("Synced value"); font-size: 13px; color: Theme.current.text_settings; }
+                if root.info.status != 0: Text { text: root.info.shared_value; font-size: 16px; color: Theme.current.scope_synced_text; wrap: word-wrap; min-width: 0px; }
+                Text {
+                    text: root.info.status == 0 ? @tr("This setting is saved only on this device. Changes won’t affect your other devices.") : root.info.status == 2 ? @tr("This device uses a separate value. Changes here won’t affect your other devices.") : !root.info.can_override ? @tr("This setting always syncs. Changes apply to your paired devices.") : @tr("Changes sync to your paired devices. Choose a separate value to keep future changes on this device.");
+                    font-size: 14px; color: Theme.current.text_settings; wrap: word-wrap;
+                }
+                if root.info.status == 2 && root.info.has_shared: Text {
+                    text: @tr("Switching back replaces this device’s value with the synced value shown above.");
+                    font-size: 13px; color: Theme.current.text_settings; wrap: word-wrap;
+                }
+                if root.info.status == 1 && !root.info.has_shared: Text {
+                    text: @tr("No synced value has been received yet. A separate value starts with the current value on this device.");
+                    font-size: 13px; color: Theme.current.text_settings; wrap: word-wrap;
+                }
+                if root.info.status == 2 && !root.info.has_shared: Text {
+                    text: @tr("No synced value is available yet. Switching back restores the value saved when you started this override.");
+                    font-size: 13px; color: Theme.current.text_settings; wrap: word-wrap;
+                }
+                if root.info.status == 2 && !root.info.shared_supported: Text {
+                    text: @tr("This version cannot use the synced value. Update the app before switching back. You can keep using your separate value.");
+                    font-size: 13px; color: Theme.current.text_settings; wrap: word-wrap; min-width: 0px;
+                }
+                if root.info.status != 0 && root.info.can_override: PillButton {
+                    enabled: root.info.status != 2 || root.info.shared_supported;
+                    label: root.info.status == 2 ? @tr("Use synced value") : @tr("Use device override");
+                    primary: true; width: 100%; focused: root.action_index == 0;
+                    clicked => { SettingsSync.override_changed(SettingsSync.selected_key, root.info.status != 2); root.close(); }
+                }
+                if root.info.status == 2: PillButton {
+                    label: @tr("Keep override and edit setting"); width: 100%; focused: root.action_index == 1;
+                    clicked => { root.close(); }
+                }
+                if root.info.status == 0 || !root.info.can_override: PillButton { label: @tr("Close"); width: 100%; clicked => { root.close(); } }
+            }
+        }
+    }
+}

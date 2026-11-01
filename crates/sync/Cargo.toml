@@ -1,0 +1,48 @@
+[package]
+name = "nova-sync"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+
+# Cross-device sync over iroh: a generic per-record store (last-write-wins with
+# tombstones) plus a small custom ALPN protocol that exchanges only the records
+# a peer is missing or has stale. Split into a leaf crate (like `nova-torrent`)
+# so the heavy iroh/QUIC dependency tree doesn't recompile on app-logic edits.
+#
+# Applications decompose state into `notify(domain, key, value, ts)` calls and
+# rebuild their own types from `records(domain)`. RecordPolicy and explicit
+# optional Nova extensions keep domain semantics outside the generic transport.
+
+[features]
+default = ["playback", "nova-progress"]
+playback = ["dep:nova-playback-api"]
+nova-progress = []
+
+[dependencies]
+nova-playback-api = { path = "../playback-api", optional = true }
+nova-storage = { path = "../storage" }
+anyhow = "1"
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+# Wire format: compact binary serde. `alloc` enables to_allocvec/take_from_bytes
+# for the Vec/String-bearing frames.
+postcard = { version = "1", features = ["alloc"] }
+# Frame bodies (`Hello` digests, record batches) are postcard, which is compact
+# but not redundant-free: repeated keys, a per-record device id and JSON record
+# values still compress well. Share the zstd implementation already used by
+# local metadata storage; Android builds compile it through the NDK.
+zstd = { version = "0.13", default-features = false }
+# Digest hashing for the exchange short-circuit (domain -> version-map hash).
+# Already in the lock via iroh, so this adds no new compiled crate.
+blake3 = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+# Core iroh only (stable 1.x API). Default features bring `tls-ring` (the
+# crypto provider that cross-compiles cleanly to Android via the NDK) plus
+# relay/portmapper support needed by the N0 preset.
+iroh = "1.2"
+
+[dev-dependencies]
+# The store-persistence integration test seeds a legacy blob and inspects rows.
+nova-storage = { path = "../storage" }

@@ -1,0 +1,75 @@
+import { SettingsStyle } from "@NovaUiShared";
+export struct SyncPeer { id: string, name: string, last_seen: string }
+export struct SyncInvite { id: string }
+export struct SyncInspectorRow { title: string, detail: string, status: string }
+
+// Same semantic contract as Nova's compiled SettingsBridge.
+export global SyncBridge {
+    out property <int> sel: 7;
+    in-out property <bool> sync_background_available: false;
+    in-out property <bool> invite_qr_available: true;
+    in-out property <bool> remote_control_enabled: false;
+    in-out property <bool> sync_inspector_active: false;
+    in-out property <[SyncInspectorRow]> sync_inspector_rows: [];
+    in-out property <[SyncInspectorRow]> sync_inspector_episodes: [];
+    in-out property <string> sync_inspector_query: "";
+    callback sync_inspector_refresh();
+    callback sync_inspector_query_changed(string);
+    in-out property <bool> sync_enabled: false;
+    in-out property <string> sync_identity: "";
+    in-out property <[SyncPeer]> sync_peers: [];
+    in-out property <string> sync_peer_input: "";
+    in-out property <string> sync_status: "";
+    in-out property <string> sync_device_name: "";
+    in-out property <bool> sync_pair_confirm: false;
+    in-out property <bool> sync_local_discovery: true;
+    in-out property <int> sync_interval_index: 1;
+    in-out property <bool> sync_background: true;
+    in-out property <string> sync_invite_ticket: "";
+    in-out property <image> sync_invite_qr;
+    in-out property <[SyncInvite]> sync_invites: [];
+    in-out property <string> sync_join_input: "";
+    in-out property <bool> sync_qr_scan_available: false;
+    in-out property <string> sync_link_notice: "";
+    in-out property <bool> sync_pair_prompt_visible: false;
+    in-out property <string> sync_pair_prompt_id: "";
+    in-out property <string> sync_pair_prompt_name: "";
+    in-out property <string> sync_pair_prompt_code: "";
+    out property <bool> kb_active: SettingsStyle.keyboard-mode;
+    callback sync_changed();
+    callback sync_add_peer(string);
+    callback sync_remove_peer(string);
+    callback sync_now();
+    callback sync_copy_identity();
+    callback sync_device_name_edited(string);
+    callback sync_pair_confirm_changed(bool);
+    callback sync_local_discovery_changed(bool);
+    callback sync_interval_picked(int);
+    callback sync_background_changed(bool);
+    callback sync_create_invite();
+    callback sync_cancel_invite(string);
+    callback sync_copy_ticket(string);
+    callback sync_join_invite(string);
+    callback sync_scan_qr();
+    callback sync_respond_pair(string, bool);
+}
+
+export { SettingSyncBadge } from "../slint/settings-sync.slint";
+export component SettingsRow inherits Rectangle {
+    in property <string> setting-key;
+    in property <string> row-title;
+    in property <string> row-desc;
+    in property <bool> tinted;
+    VerticalLayout { @children }
+}
+export global SyncContent {
+    in-out property <bool> advanced_visible: true;
+    in-out property <bool> input_focused: false;
+    in-out property <length> content_min_height;
+    in-out property <length> content_preferred_height;
+    in-out property <bool> sync_remove_prompt_visible: false;
+    in-out property <string> sync_remove_prompt_id;
+    in-out property <string> sync_remove_prompt_name;
+    callback schedule_setting(string);
+    public function reveal_detail_control(y: length, height: length) { SettingsStyle.reveal_control(y, height, false); }
+}

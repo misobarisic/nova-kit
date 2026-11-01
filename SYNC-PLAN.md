@@ -1,14 +1,14 @@
-# Sync extraction assessment
+# Shared sync architecture
 
 Audited Nova `c035d61af9b57e34b997b44e53a379652bf5654a`, Reader
 `63110af43a5ac909f972b2f8adf8e33cd90c1353` and Kit
-`689f86852aaaf5b13f1f51178672ac5de6745795`. This is an implementation plan;
-Kit does not provide `nova-sync` yet and Reader does not sync yet.
+`689f86852aaaf5b13f1f51178672ac5de6745795`. The engine, optional playback contract and shared settings components are now
+implemented in Kit. The consumer integrations follow the boundaries below.
 
-## Recommended boundary
+## Ownership boundary
 
-Move the actual engine and its regressions from Nova's `crates/sync` into Kit,
-then make both apps consume that published revision. Preserve Nova's existing
+The actual engine and its regressions moved from Nova's `crates/sync` into Kit;
+both apps consume the published revision. Preserve Nova's existing
 wire format, stored records, identities and pairings. Do not introduce a second
 Reader-only sync implementation or copy the whole video application adapter.
 
@@ -28,7 +28,7 @@ alone would not give Reader either the data integration or settings UI.
 ## Couplings to remove first
 
 1. `crates/sync/Cargo.toml` depends on `nova-config` for wall-clock/hash helpers
-   and on `nova-playback-api`. Move the small deterministic helpers with their
+   and on `nova-playback-api`. The small clock/hash helpers move with their
    compatibility tests; retain playback as an explicit Nova extension, outside
    the generic engine. Reader must not pull in video-domain dependencies.
 2. `store.rs` recognizes a domain called `progress` and invokes `progress.rs`.
@@ -68,14 +68,14 @@ offline edits on two devices overwrite each other.
 | Resume position | Full `ChapterId`, stable page ID plus `ResumeAnchor` fractional offset; latest intentional activity, rather than maximum offset, allows rereading |
 | Chapter completion | Explicit read/unread action version separate from frequent resume checkpoints; a late old checkpoint must not undo a manual mark unread/read |
 | History | Chapter identity and activity timestamp, with independent removals so hidden entries do not return after an old peer reconnects |
-| Bookmarks | Requires a durable bookmark ID and deletion record: the current bookmark has only chapter, anchor and note, so editing its note must not create a new identity |
+| Bookmarks | Composite immutable chapter/page/offset identity and deletion record; mutable note and reflow page index are excluded |
 | Settings | Field-level shared values with local override baselines; keep paths, cache quotas, orientation/device policy and credentials local by default |
 | Source packages and catalogue switches | Stable package/source IDs; reuse verified package blobs, but retain Reader's `nova-reader1` runtime gate and permission-expansion consent |
 
-Categories already have an ID, but creation currently derives it only from a
-timestamp (`category-{now()}` in `src/app.rs`); use collision-resistant IDs for
-independent offline devices. Bookmarks lack an ID. Both changes need explicit
-migration tests before enabling record sync. Source keys
+New categories use a device identity plus durable local sequence; existing
+category IDs remain valid. Bookmark keys use their stable source-local chapter,
+page and fractional offset, excluding mutable notes and reflow page indices.
+Source keys
 must never be replaced by chapter numbers, title strings or expiring page URLs.
 Fetched chapter lists and covers are metadata/cache, not membership authority.
 

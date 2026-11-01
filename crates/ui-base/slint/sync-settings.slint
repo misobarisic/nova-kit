@@ -1,0 +1,692 @@
+import { Theme } from "@NovaUiShared";
+import { SyncBridge as SettingsBridge, SyncContent as SettingsContent, SettingsRow, SettingSyncBadge } from "@NovaSyncHost";
+
+import { SearchField } from "searchfield.slint";
+
+import { PillButton, ToggleSwitch, Segmented, SectionHeader } from "settings-controls.slint";
+
+component InspectorRow inherits Rectangle {
+    in property <string> title;
+    in property <string> detail;
+    in property <string> status;
+    // The section slot may be taller than its content; keep record text
+    // intrinsic instead of distributing that surplus across wrapped labels.
+    vertical-stretch: 0;
+    height: row_body.preferred-height;
+    background: Theme.current.card;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: Theme.current.border_soft;
+    row_body := VerticalLayout {
+        alignment: start;
+        padding: 14px;
+        spacing: 7px;
+        Text { text: root.title; color: Theme.current.text_bright; font-size: 14px; font-weight: 600; wrap: word-wrap; min-width: 0px; }
+        Text { text: root.status; color: Theme.current.accent_soft; font-size: 12px; wrap: word-wrap; min-width: 0px; }
+        Text { text: root.detail; color: Theme.current.text_settings; font-size: 12px; wrap: word-wrap; min-width: 0px; }
+    }
+}
+
+// The shell owns scrolling and transitions. Report intrinsic layout sizes
+// only while this section is selected, so outgoing instances cannot resize it.
+export component SyncSettingsPage inherits Rectangle {
+    in property <bool> reading-terminology: false;
+    in property <bool> remote-control-available: true;
+    in property <bool> background-sync-available: true;
+    in property <bool> invite-qr-available: true;
+    background: transparent;
+    min-width: 0px;
+    preferred-width: 0px;
+    min-height: body_layout.min-height;
+    preferred-height: body_layout.preferred-height;
+    private property <length> measured_min: body_layout.min-height;
+    private property <length> measured_preferred: body_layout.preferred-height;
+    changed measured_min => { root.publish_size(); }
+    changed measured_preferred => { root.publish_size(); }
+    private property <bool> inspector_open: false;
+    private property <bool> inspector_episodes_open: false;
+    private property <bool> advanced_visible: SettingsContent.advanced_visible;
+    changed advanced_visible => { if !root.advanced_visible { root.inspector_open = false; SettingsBridge.sync_inspector_active = false; } }
+    init => { root.publish_size(); SettingsBridge.sync_inspector_active = false; }
+    function publish_size() {
+        if SettingsBridge.sel == 7 {
+            SettingsContent.content_min_height = root.measured_min;
+            SettingsContent.content_preferred_height = root.measured_preferred;
+        }
+    }
+    body_layout := VerticalLayout {
+        width: 100%; height: 100%; spacing: 0px;
+        VerticalLayout {
+
+            vertical-stretch: 0;
+            spacing: 18px;
+
+            // Incoming pairing request (confirmation mode).
+            if SettingsBridge.sync_pair_prompt_visible: Rectangle {
+                background: Theme.current.pairing_prompt;
+                border-radius: 16px;
+                border-width: 1px;
+                border-color: Theme.current.accent;
+                clip: true;
+
+                VerticalLayout {
+                    spacing: 10px;
+                    padding-top: 16px;
+                    padding-bottom: 16px;
+                    padding-left: 16px;
+                    padding-right: 16px;
+
+                    Text {
+                        text: @tr("Pairing request");
+                        // A heading may wrap: without this it reports its full
+                        // single-line width as the card minimum.
+                        wrap: word-wrap;
+                        min-width: 0px;
+                        font-size: 14px;
+                        font-weight: 700;
+                        color: Theme.current.text_bright;
+                    }
+
+                    Text {
+                        text: @tr("{} wants to sync with this device.", SettingsBridge.sync_pair_prompt_name);
+                        font-size: 14px;
+                        color: Theme.current.text_settings;
+                        wrap: word-wrap;
+                        // A device name can be one long token; without
+                        // min-width: 0 it would set the page's minimum
+                        // width and let the subpage pan sideways.
+                        min-width: 0px;
+                    }
+
+                    Text {
+                        text: @tr("Match code: {}", SettingsBridge.sync_pair_prompt_code);
+                        font-size: 20px;
+                        font-weight: 700;
+                        color: Theme.current.accent_soft;
+                        letter-spacing: 4px;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 12px;
+
+                        PillButton {
+                            label: @tr("Accept");
+                            primary: true;
+                            clicked => { SettingsBridge.sync_respond_pair(SettingsBridge.sync_pair_prompt_id, true); }
+                        }
+
+                        PillButton {
+                            label: @tr("Deny");
+                            clicked => { SettingsBridge.sync_respond_pair(SettingsBridge.sync_pair_prompt_id, false); }
+                        }
+                    }
+                }
+            }
+
+            if SettingsContent.advanced_visible: VerticalLayout {
+                vertical-stretch: 0; spacing: 16px;
+                SectionHeader { label: @tr("SYNC INSPECTOR"); }
+                inspector_intro := Rectangle {
+                    vertical-stretch: 0;
+                    height: intro_body.preferred-height;
+                    background: Theme.current.card;
+                    border-radius: 16px;
+                    border-width: 1px;
+                    border-color: Theme.current.border_soft;
+                    intro_body := VerticalLayout {
+                        alignment: start;
+                        padding: 16px;
+                        spacing: 12px;
+                        Text {
+                            text: @tr("Understand this device's sync state");
+                            color: Theme.current.text_bright;
+                            font-size: 16px;
+                            font-weight: 600;
+                            wrap: word-wrap; min-width: 0px;
+                        }
+                        Text {
+                            text: root.reading-terminology ? @tr("Inspect stored data, pending local application and chapter reading states. Read only; available even while sync is off.") : @tr("Inspect stored data, pending local application and the actions behind an episode's watched state. Read only; available even while sync is off.");
+                            color: Theme.current.text_settings;
+                            font-size: 13px;
+                            wrap: word-wrap; min-width: 0px;
+                        }
+                        PillButton {
+                            accessible-id: "sync-inspector-toggle";
+                            label: root.inspector_open ? @tr("Close inspector") : @tr("Open inspector");
+                            clicked => { root.inspector_open = !root.inspector_open; SettingsBridge.sync_inspector_active = root.inspector_open; if root.inspector_open { SettingsBridge.sync_inspector_refresh(); } }
+                        }
+                    }
+                }
+                if root.inspector_open: VerticalLayout {
+                    vertical-stretch: 0;
+                    alignment: start;
+                    spacing: 12px;
+                    Text {
+                        text: root.reading-terminology ? @tr("LOCAL INVENTORY") : @tr("CURRENT PROFILE · LOCAL INVENTORY");
+                        color: Theme.current.text_bright; font-size: 12px; font-weight: 600;
+                        wrap: word-wrap; min-width: 0px;
+                    }
+                    Text {
+                        text: @tr("Stored records are this device's sync state. A completed exchange snapshot is a local watermark, not proof that another device applied every record. Newer records may need another exchange; their delivery is unknown. Pending application means records still need to be applied here.");
+                        color: Theme.current.text_settings; font-size: 12px;
+                        wrap: word-wrap; min-width: 0px;
+                    }
+                    for row in SettingsBridge.sync_inspector_rows: InspectorRow {
+                        title: row.title; detail: row.detail; status: row.status;
+                    }
+                    if SettingsBridge.sync_inspector_rows.length == 0: Text {
+                        text: @tr("No sync records stored yet. Local changes appear here after they are saved.");
+                        color: Theme.current.text_settings; font-size: 13px;
+                        wrap: word-wrap; min-width: 0px;
+                    }
+                    PillButton {
+                        accessible-id: "sync-inspector-refresh";
+                        label: @tr("Refresh inspector");
+                        clicked => { SettingsBridge.sync_inspector_refresh(); }
+                    }
+                    PillButton {
+                        accessible-id: "sync-inspector-episodes";
+                        label: root.reading-terminology ? (root.inspector_episodes_open ? @tr("Hide chapter explanations") : @tr("Explain reading states")) : (root.inspector_episodes_open ? @tr("Hide episode explanations") : @tr("Explain watched states"));
+                        clicked => { root.inspector_episodes_open = !root.inspector_episodes_open; }
+                    }
+                    if root.inspector_episodes_open: VerticalLayout {
+                        vertical-stretch: 0;
+                        alignment: start;
+                        spacing: 12px;
+                        SearchField {
+                            min-width: 0px;
+                            show-pointer-focus: false; keyboard-mode: SettingsBridge.kb_active;
+                            roomy: true;
+                            text <=> SettingsBridge.sync_inspector_query;
+                            placeholder-text: root.reading-terminology ? @tr("Find a saved title or chapter") : @tr("Find a saved title or episode");
+                            focus_changed(focused) => { SettingsContent.input_focused = focused; if (focused && SettingsBridge.kb_active) { SettingsContent.reveal_detail_control(self.absolute-position.y, self.height); } }
+                            edited(query) => { SettingsBridge.sync_inspector_query_changed(query); }
+                            accepted(query) => { SettingsBridge.sync_inspector_query_changed(query); }
+                        }
+                        Text {
+                            text: root.reading-terminology ? @tr("Up to 80 most recently changed matching chapters. Details describe saved reading state, not a full event history.") : @tr("Up to 80 most recently changed matching episodes. Action clocks show milliseconds, logical counter and device tie-break ID. They describe the winning registers, not a full event history.");
+                            color: Theme.current.text_settings; font-size: 12px;
+                            wrap: word-wrap; min-width: 0px;
+                        }
+                        for row in SettingsBridge.sync_inspector_episodes: InspectorRow {
+                            title: row.title; detail: row.detail; status: row.status;
+                        }
+                        if SettingsBridge.sync_inspector_episodes.length == 0: Text {
+                            text: root.reading-terminology ? @tr("No matching saved chapter states.") : @tr("No matching saved episode states.");
+                            color: Theme.current.text_settings; font-size: 13px;
+                            wrap: word-wrap; min-width: 0px;
+                        }
+                    }
+                }
+
+
+            }
+            SectionHeader { label: @tr("Cross-device sync"); }
+
+            // ---- Sync --------------------------------------
+            // Cross-device sync (opt-in). Peers are added by
+            // endpoint id; there is no account or server.
+
+            Rectangle {
+                background: Theme.current.card;
+                border-radius: 16px;
+                border-width: 1px;
+                border-color: Theme.current.border_soft;
+                clip: true;
+
+                VerticalLayout {
+                    spacing: 0px;
+
+                    SettingsRow {
+                        setting-key: "sync_enabled";
+                        row-title: @tr("Enable cross-device sync");
+                        row-desc: root.reading-terminology ? @tr("Keep your library, reading progress, history and settings in step across your devices. Direct, end-to-end encrypted connections — no account or server.") : @tr("Keep your library, watch history, addons and settings in step across your devices. Direct, end-to-end encrypted connections — no account or server.");
+
+                        ToggleSwitch {
+                            name: @tr("Enable cross-device sync");
+                            checked <=> SettingsBridge.sync_enabled;
+                            toggled => { SettingsBridge.sync_changed(); }
+                        }
+                    }
+
+                }
+
+            }
+
+            if SettingsBridge.sync_enabled: VerticalLayout {
+                spacing: 18px;
+
+                SectionHeader {
+                    icon-kind: 7;
+                    label: @tr("THIS DEVICE");
+                }
+
+                if root.remote-control-available: SettingsRow {
+                    border-radius: 16px;
+                    border-width: 1px;
+                    border-color: Theme.current.border_soft;
+                    clip: true;
+                    setting-key: "remote_control_enabled";
+                    row-title: @tr("Allow remote control");
+                    row-desc: @tr("Let paired devices view playback, start streams and control this device. Turning this off keeps normal sync working. Applies only to this device.");
+                    ToggleSwitch {
+                        name: @tr("Allow remote control");
+                        checked <=> SettingsBridge.remote_control_enabled;
+                        toggled => { SettingsContent.schedule_setting("remote_control_enabled"); }
+                    }
+                }
+
+                Rectangle {
+                    background: Theme.current.card;
+                    border-radius: 16px;
+                    border-width: 1px;
+                    border-color: Theme.current.border_soft;
+                    clip: true;
+
+                    VerticalLayout {
+                        spacing: 12px;
+                        padding-top: 16px;
+                        padding-bottom: 16px;
+                        padding-left: 16px;
+                        padding-right: 16px;
+
+                        Text {
+                            text: @tr("Device name");
+                            font-size: 14px;
+                            font-weight: 600;
+                            color: Theme.current.text_bright;
+                        }
+                        SettingSyncBadge { max-width: Math.min(self.preferred-width, parent.width); setting_key: "sync_device_name"; setting_title: @tr("Device name"); }
+
+                        SearchField {
+                            show-pointer-focus: false; keyboard-mode: SettingsBridge.kb_active;
+                            roomy: true;
+                            text <=> SettingsBridge.sync_device_name;
+                            placeholder-text: @tr("Device name");
+                            focus_changed(focused) => { SettingsContent.input_focused = focused; if (focused && SettingsBridge.kb_active) { SettingsContent.reveal_detail_control(self.absolute-position.y, self.height); } }
+                            edited(t) => { SettingsBridge.sync_device_name_edited(t); }
+                            accepted(t) => { SettingsBridge.sync_device_name_edited(t); }
+                            min-width: 0px;
+                        }
+
+                        Text {
+                            text: @tr("Endpoint ID");
+                            font-size: 14px;
+                            font-weight: 600;
+                            color: Theme.current.text_bright;
+                        }
+
+                        Text {
+                            text: SettingsBridge.sync_identity;
+                            font-size: 14px;
+                            color: Theme.current.accent_soft;
+                            overflow: elide;
+                            min-width: 0px;
+                        }
+
+                        Text {
+                            text: @tr("Share this with a peer so it can add this device.");
+                            font-size: 14px;
+                            color: Theme.current.text_settings;
+                            wrap: word-wrap;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 12px;
+
+                            PillButton {
+                                label: @tr("Copy");
+                                clicked => { SettingsBridge.sync_copy_identity(); }
+                            }
+
+                            PillButton {
+                                label: @tr("Sync now");
+                                primary: true;
+                                clicked => { SettingsBridge.sync_now(); }
+                            }
+                        }
+
+                        if SettingsBridge.sync_status != "": Text {
+                            text: SettingsBridge.sync_status;
+                            font-size: 14px;
+                            color: Theme.current.text_settings;
+                            wrap: word-wrap;
+                            // Status text embeds peer endpoint ids and
+                            // errors; keep a long token from widening
+                            // the page.
+                            min-width: 0px;
+                        }
+                    }
+                }
+
+                SectionHeader {
+                    icon-kind: 7;
+                    label: @tr("AUTO-SYNC");
+                }
+
+                Rectangle {
+                    background: Theme.current.card;
+                    border-radius: 16px;
+                    border-width: 1px;
+                    border-color: Theme.current.border_soft;
+                    clip: true;
+
+                    VerticalLayout {
+                        spacing: 0px;
+
+                        if SettingsContent.advanced_visible: VerticalLayout {
+                            vertical-stretch: 0; spacing: 0px;
+                            SettingsRow {
+                                setting-key: "sync_interval";
+                                row-title: @tr("Auto-sync while the app is running");
+                                row-desc: @tr("How often to check for changes while the app is open or a download is active.");
+
+                                Segmented {
+                                    labels: [@tr("30s"), @tr("1m"), @tr("5m"), @tr("15m")];
+                                    current_index: SettingsBridge.sync_interval_index;
+                                    picked(i) => { SettingsBridge.sync_interval_index = i; SettingsBridge.sync_interval_picked(i); }
+                                }
+                            }
+                        }
+
+                        if root.background-sync-available: SettingsRow {
+                            setting-key: "sync_background";
+                            row-title: @tr("Background sync");
+                            row-desc: @tr("Best-effort sync while the app is closed. Android schedules it and may delay it — often every 15–60 min, longer in deep Doze.");
+
+                            ToggleSwitch {
+                                name: @tr("Background sync");
+                                checked <=> SettingsBridge.sync_background;
+                                toggled => { SettingsBridge.sync_background_changed(SettingsBridge.sync_background); }
+                            }
+                        }
+
+                        SettingsRow {
+                            setting-key: "sync_local_discovery";
+                            row-title: @tr("Local network discovery");
+                            row-desc: @tr("Probe the local network for direct connections (UPnP, LAN discovery). Turn off on faulty Wi-Fi that chokes on multicast traffic.");
+
+                            ToggleSwitch {
+                                name: @tr("Local network discovery");
+                                checked <=> SettingsBridge.sync_local_discovery;
+                                toggled => { SettingsBridge.sync_local_discovery_changed(SettingsBridge.sync_local_discovery); }
+                            }
+                        }
+                    }
+                }
+
+                SectionHeader {
+                    icon-kind: 7;
+                    label: @tr("PAIRING");
+                }
+
+                Rectangle {
+                    background: Theme.current.card;
+                    border-radius: 16px;
+                    border-width: 1px;
+                    border-color: Theme.current.border_soft;
+                    clip: true;
+
+                    VerticalLayout {
+                        spacing: 0px;
+
+                        SettingsRow {
+                            setting-key: "sync_pair_confirm";
+                            row-title: @tr("Ask before accepting devices");
+                            row-desc: @tr("Show a confirmation prompt with a match code instead of trusting an invite automatically.");
+
+                            ToggleSwitch {
+                                name: @tr("Ask before accepting devices");
+                                checked <=> SettingsBridge.sync_pair_confirm;
+                                toggled => { SettingsBridge.sync_pair_confirm_changed(SettingsBridge.sync_pair_confirm); }
+                            }
+                        }
+
+                        Rectangle {
+                            background: Theme.current.card;
+
+                            VerticalLayout {
+                                spacing: 10px;
+                                padding-top: 16px;
+                                padding-bottom: 16px;
+                                padding-left: 16px;
+                                padding-right: 16px;
+
+                                Text {
+                                    text: @tr("Create an invite to add another device");
+                                    // A heading may wrap: without this it reports its full
+                                    // single-line width as the card minimum.
+                                    wrap: word-wrap;
+                                    min-width: 0px;
+                                    font-size: 14px;
+                                    color: Theme.current.text_settings;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
+
+                                    PillButton {
+                                        label: @tr("Create invite");
+                                        primary: true;
+                                        clicked => { SettingsBridge.sync_create_invite(); }
+                                    }
+
+                                    if SettingsBridge.sync_invite_ticket != "": PillButton {
+                                        label: @tr("Copy code");
+                                        clicked => { SettingsBridge.sync_copy_ticket(SettingsBridge.sync_invite_ticket); }
+                                    }
+                                }
+
+                                if root.invite-qr-available && SettingsBridge.sync_invite_ticket != "": HorizontalLayout {
+                                    // QR of the ticket: a phone
+                                    // camera (the Android scanner)
+                                    // reads it as if pasted. White
+                                    // backdrop + pixelated scaling
+                                    // keep the modules crisp.
+                                    alignment: center;
+                                    Rectangle {
+                                        background: Theme.current.text_bright;
+                                        border-radius: 8px;
+                                        width: 220px;
+                                        height: 220px;
+                                        Image {
+                                            source: SettingsBridge.sync_invite_qr;
+                                            width: 100%;
+                                            height: 100%;
+                                            image-fit: contain;
+                                            image-rendering: pixelated;
+                                        }
+                                    }
+                                }
+
+                                if SettingsBridge.sync_invite_ticket != "": Text {
+                                    text: SettingsBridge.sync_invite_ticket;
+                                    font-size: 14px;
+                                    color: Theme.current.accent_soft;
+                                    wrap: word-wrap;
+                                    // The ticket is an "NV1" base32 token
+                                    // with no break opportunities; elide it
+                                    // (there is a Copy button) so it can
+                                    // never widen the page.
+                                    overflow: elide;
+                                    min-width: 0px;
+                                }
+                            }
+                        }
+
+                        for invite[i] in SettingsBridge.sync_invites: SettingsRow {
+                            tinted: Math.mod(i, 2) == 0;
+                            row-title: @tr("Invite {}", invite.id);
+                            row-desc: "";
+
+                            PillButton {
+                                label: @tr("Cancel");
+                                clicked => { SettingsBridge.sync_cancel_invite(invite.id); }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    background: Theme.current.card;
+                    border-radius: 16px;
+                    border-width: 1px;
+                    border-color: Theme.current.border_soft;
+                    clip: true;
+
+                    VerticalLayout {
+                        spacing: 10px;
+                        padding-top: 16px;
+                        padding-bottom: 16px;
+                        padding-left: 16px;
+                        padding-right: 16px;
+
+                        Text {
+                            text: @tr("Join with an invite code");
+                            // A heading may wrap: without this it reports its full
+                            // single-line width as the card minimum.
+                            wrap: word-wrap;
+                            min-width: 0px;
+                            font-size: 14px;
+                            color: Theme.current.text_settings;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 12px;
+
+                            SearchField {
+                                show-pointer-focus: false; keyboard-mode: SettingsBridge.kb_active;
+                                roomy: true;
+                                text <=> SettingsBridge.sync_join_input;
+                                placeholder-text: @tr("paste invite code");
+                                focus_changed(focused) => { SettingsContent.input_focused = focused; if (focused && SettingsBridge.kb_active) { SettingsContent.reveal_detail_control(self.absolute-position.y, self.height); } }
+                                horizontal-stretch: 1;
+                                min-width: 0px;
+                                accepted(t) => { SettingsBridge.sync_join_invite(t); }
+                            }
+
+                            PillButton {
+                                label: @tr("Join");
+                                roomy: true;
+                                primary: true;
+                                clicked => { SettingsBridge.sync_join_invite(SettingsBridge.sync_join_input); }
+                            }
+                        }
+
+                        // Android only: aim the camera at the
+                        // other device's invite QR. Decoding
+                        // joins automatically.
+                        if SettingsBridge.sync_qr_scan_available: PillButton {
+                            label: @tr("Scan QR code");
+                            clicked => { SettingsBridge.sync_scan_qr(); }
+                        }
+
+                        if SettingsBridge.sync_link_notice != "": Text {
+                            text: SettingsBridge.sync_link_notice;
+                            font-size: 14px;
+                            color: Theme.current.text_settings;
+                            wrap: word-wrap;
+                            min-width: 0px;
+                        }
+                    }
+                }
+
+                SectionHeader {
+                    icon-kind: 7;
+                    label: @tr("PEERS");
+                }
+
+                Rectangle {
+                    background: Theme.current.card;
+                    border-radius: 16px;
+                    border-width: 1px;
+                    border-color: Theme.current.border_soft;
+                    clip: true;
+
+                    VerticalLayout {
+                        spacing: 0px;
+
+                        if SettingsContent.advanced_visible: VerticalLayout {
+                            vertical-stretch: 0; spacing: 16px;
+                            Rectangle {
+                                background: Theme.current.card;
+
+                                VerticalLayout {
+                                    spacing: 10px;
+                                    padding-top: 16px;
+                                    padding-bottom: 16px;
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+
+                                    Text {
+                                        text: @tr("Add a device by its endpoint ID");
+                                        // A heading may wrap: without this it reports its full
+                                        // single-line width as the card minimum.
+                                        wrap: word-wrap;
+                                        min-width: 0px;
+                                        font-size: 14px;
+                                        color: Theme.current.text_settings;
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 12px;
+
+                                        sync_peer_field := SearchField {
+                                            show-pointer-focus: false; keyboard-mode: SettingsBridge.kb_active;
+                                            roomy: true;
+                                            text <=> SettingsBridge.sync_peer_input;
+                                            placeholder-text: @tr("peer endpoint id");
+                                            focus_changed(focused) => { SettingsContent.input_focused = focused; if (focused && SettingsBridge.kb_active) { SettingsContent.reveal_detail_control(self.absolute-position.y, self.height); } }
+                                            horizontal-stretch: 1;
+                                            min-width: 0px;
+                                            accepted(t) => { SettingsBridge.sync_add_peer(t); }
+                                        }
+
+                                        PillButton {
+                                            label: @tr("Add");
+                                            roomy: true;
+                                            primary: true;
+                                            clicked => { SettingsBridge.sync_add_peer(SettingsBridge.sync_peer_input); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        for peer[i] in SettingsBridge.sync_peers: SettingsRow {
+                            tinted: Math.mod(i, 2) == 0;
+                            row-title: peer.name == "" ? peer.id : peer.name;
+                            row-desc: (peer.name == "" ? "" : peer.id + "\n") + peer.last_seen;
+
+                            PillButton {
+                                accessible-id: "sync-remove:" + peer.id;
+                                label: @tr("Remove");
+                                destructive: true;
+                                clicked => {
+                                    SettingsContent.sync_remove_prompt_id = peer.id;
+                                    SettingsContent.sync_remove_prompt_name = peer.name == "" ? peer.id : peer.name;
+                                    SettingsContent.sync_remove_prompt_visible = true;
+                                }
+                            }
+                        }
+
+                        if SettingsBridge.sync_peers.length == 0: Rectangle {
+                            background: Theme.current.card;
+                            min-height: 56px;
+
+                            Text {
+                                x: 16px;
+                                y: (parent.height - self.height) / 2;
+                                width: parent.width - 32px;
+                                text: @tr("No peers yet. Add another device to start syncing.");
+                                font-size: 14px;
+                                color: Theme.current.text_settings;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,22 @@
+export { Theme, ThemePalette, Anim, InterfaceStyle, SettingsStyle, ControlInput, SliderGesture, SheetItem } from "../slint/host-globals.slint";
+export struct SettingSyncInfo { can_override: bool, key: string, status: int, local_value: string, shared_value: string, has_shared: bool, shared_supported: bool }
+
+export global SettingsSync {
+    in-out property <[SettingSyncInfo]> rows;
+    // Mirrors the device's actual cross-device sync setting. Scope badges are
+    // presentation only and disappear when syncing is disabled.
+    in-out property <bool> enabled: false;
+    in-out property <bool> open: false;
+    in-out property <string> selected_key;
+    in-out property <string> selected_title;
+    pure callback lookup(string) -> int;
+    callback requested();
+    callback override_changed(string, bool);
+    changed enabled => { if !self.enabled { self.open = false; } }
+    public function show(key: string, title: string) {
+        self.selected_key = key;
+        self.selected_title = title;
+        self.requested();
+        self.open = true;
+    }
+}
