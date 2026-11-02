@@ -60,7 +60,9 @@ limits, direct RGBA row conversion and auxiliary-box skipping. The existing
 synthetic RGB/alpha and boxed-metadata tests/fixtures move unchanged with it.
 The public magic probe is renamed `is_jpeg_xl`; Reader retains a thin adapter.
 Decoding uses jxl-oxide 0.12.6 (MIT OR Apache-2.0), with Rayon and native CMS off.
-Custom ICC, previews, animation, CMYK and extra channels remain unsupported.
+Custom ICC, dedicated embedded previews, animation, CMYK and unsupported extra
+channels remain outside the still-image subset; incremental progressive passes
+are described below.
 
 `src/jxl_encode.rs` adds eight-bit RGBA encoding using jixel 0.5.2
 (BSD-3-Clause OR Apache-2.0), a Rust implementation derived from libjxl-tiny.
@@ -81,3 +83,46 @@ The cache's opt-in `jxl_lossless_jpeg` defaults to false and applies only to JPE
 inputs that do not require resizing. Unsupported JPEGs and other images use the
 selected normal encoder/quality. The false recipe omits the new field, preserving
 existing keys. Tests reconstruct the original JPEG byte for byte using jxl-oxide.
+
+## Incremental JPEG XL
+
+`ProgressiveJxlDecoder` adds a stateful, single-threaded jxl-oxide 0.12.6 path.
+`feed` accepts arbitrary raw/container chunk boundaries without rendering or
+retaining a second encoded body. Consumers throttle `render_preview` themselves
+(for example every 200 ms). Header admission exposes stable, oriented native
+`PageDimensions` before pixels; provisional full-image RGBA previews preserve
+that geometry while fitting `JxlPreviewOptions`. The default preview bound is
+1024×2048 and 8 MiB, with an unconditional 32 MiB RGBA ceiling and no upscaling.
+
+Preview conversion streams one or two native rows into the bounded output,
+requests sRGB as in strict decoding and interpolates alpha with premultiplied
+weights. It never constructs a full native RGBA preview or an interleaved float
+framebuffer. Existing `DecodeLimits` and the grid allocation tracker remain in
+force, reserving native final RGBA/row space before image allocation. Consumers
+retain their own display-model budget for copies and previously returned previews.
+Header probing is bounded independently at 256 KiB; auxiliary metadata is skipped
+without decompression, as in the original decoder.
+
+A preview is not a completed page. `validate_complete` checks outer container
+EOF, final `jxlp` flags, jxl-oxide finalization and the complete still frame
+without constructing native RGBA. A consumer using an existing display decoder
+must call it and drop the incremental decoder before allocating that decoder's
+final output. `finish` validates and returns native RGBA directly. Truncated or
+malformed input must fail the final gate even after a useful preview. The same
+outer framing check also tightens strict `decode_jxl`/`inspect_jxl`: complete
+pixels in a truncated container are rejected, while valid unknown metadata,
+extended-length boxes and final size-zero boxes remain supported.
+
+Dedicated embedded thumbnails, custom ICC, animation, CMYK and the previously
+unsupported extra-channel layouts remain outside the supported subset. The
+incremental header gate reports `Error::JxlUnsupported` distinctly so consumers
+can separate a feature fallback from invalid input. Files without a useful
+partial frame return no preview and retain their normal strict final path.
+`render_preview` errors do not poison feeding/final validation; failed `feed`
+calls terminate that decoder. Decoder limits remain allocation admission rather
+than a bound on all process/GPU memory.
+
+`tests/progressive_jxl.rs` covers authored partial RGB frames, native final pixel
+identity, alpha, oriented JPEG reconstruction, tiny rows, arbitrary chunking,
+container framing/EOF, early limits and non-progressive fallback. The small
+progressive fixture and generator are documented beside the existing fixtures.

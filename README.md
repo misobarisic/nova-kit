@@ -14,7 +14,7 @@ consumer integration contracts.
 | `nova-download` | Existing download jobs, HTTP resume, finite HLS bundles, cancellation, filesystem capacity and offline budgeting |
 | `nova-ui-base` | Slint source components, theme/animation tokens and associated assets |
 | `nova-cache` | Nova's processed image variants, decoded LRU, atomic encoded-page cache, batched usage index and incremental grouped eviction |
-| `nova-image` | Shared bounded AVIF/JPEG XL still decoders and RGBA encoders, shared by Nova and Reader |
+| `nova-image` | Shared bounded AVIF/JPEG XL still codecs and incremental JPEG XL previews, shared by Nova and Reader |
 
 Storage was extracted from Nova commit
 `7a0cb47d0977fdb64601af4f37a6e7d53b6f5e45`. Addons, downloads and UI components
@@ -97,6 +97,14 @@ AVIF encoding is **lossy**, including quality 100. rav1e 0.8.1 does not
 implement lossless AV1; a pixel-roundtrip regression also checks RGB storage
 at quality 100 rather than assuming that removing YCbCr conversion is enough.
 Applications must not offer a lossless AVIF switch for this encoder.
+
+`nova-image::ProgressiveJxlDecoder` accepts JPEG XL HTTP/file chunks and exposes
+bounded provisional RGBA through an independently throttled `render_preview`.
+Native header geometry stays stable. `validate_complete` is mandatory before
+promoting a preview or committing a file; consumers can then drop this decoder
+and use their existing final display path. `finish` instead returns validated
+native pixels. See [the incremental codec contract](crates/image/PROVENANCE.md#incremental-jpeg-xl)
+for admission, unsupported features and framing/EOF behavior.
 
 `nova-image::is_lossless_input` conservatively identifies PNG and WebP VP8L
 for input-aware cache policies. An AVIF/JPEG XL signature alone cannot prove

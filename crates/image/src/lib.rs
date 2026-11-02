@@ -3,7 +3,10 @@
 mod avif;
 pub use avif::{decode as decode_avif, inspect as inspect_avif};
 mod jxl;
-pub use jxl::{decode as decode_jxl, inspect as inspect_jxl, is_jpeg_xl};
+pub use jxl::{
+    JxlPreview, JxlPreviewOptions, ProgressiveJxlDecoder, decode as decode_jxl,
+    inspect as inspect_jxl, is_jpeg_xl,
+};
 mod jxl_encode;
 pub use jxl_encode::{JxlEncoding, encode_jxl, transcode_jpeg_to_jxl};
 mod source_encoding;
@@ -17,6 +20,8 @@ pub enum Error {
     Avif(String),
     #[error("JPEG XL: {0}")]
     Jxl(String),
+    #[error("JPEG XL preview unsupported: {0}")]
+    JxlUnsupported(&'static str),
 }
 pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
