@@ -261,6 +261,35 @@ impl Cache {
         flight.1.notify_all();
         result
     }
+    /// Physical bytes and entries whose stored resource key matches. This reads
+    /// bounded metadata only, without loading encoded payloads or following
+    /// symlinks. Namespace indexes and temporary files are excluded.
+    pub fn usage_matching(&self, matches: impl Fn(&str) -> bool) -> (u64, usize) {
+        matching_variants(&self.directory, &matches)
+            .into_iter()
+            .fold((0u64, 0usize), |(bytes, count), (_, size)| {
+                (bytes.saturating_add(size), count + 1)
+            })
+    }
+
+    /// Clear selected resource variants while preserving other files. Like
+    /// `clear`, invalidate in-flight publications for the entire namespace:
+    /// an old background writer must not resurrect a selected variant.
+    pub fn clear_matching(&self, matches: impl Fn(&str) -> bool) -> (u64, usize) {
+        let _maintenance = MaintenanceGuard::acquire();
+        let _mutation = CACHE_MUTATION.write().unwrap();
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        CACHE_GENERATION.fetch_add(1, Ordering::AcqRel);
+        let mut removed = (0u64, 0usize);
+        for (path, size) in matching_variants(&self.directory, &matches) {
+            if fs::remove_file(&path).is_ok() {
+                gc::removed(&path);
+                removed.0 = removed.0.saturating_add(size);
+                removed.1 += 1;
+            }
+        }
+        removed
+    }
     /// Removes only Kit-owned variants/index/temporary files in this namespace.
     pub fn clear(&self) -> (u64, usize) {
         let _maintenance = MaintenanceGuard::acquire();
@@ -286,6 +315,42 @@ impl Cache {
         }
         removed
     }
+}
+
+fn matching_variants(directory: &Path, matches: &impl Fn(&str) -> bool) -> Vec<(PathBuf, u64)> {
+    use std::io::Read;
+    fs::read_dir(directory)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !entry.file_name().to_str().is_some_and(gc::owned_file)
+                || path.extension()?.to_str()? != "variant"
+            {
+                return None;
+            }
+            let stat = fs::symlink_metadata(&path).ok()?;
+            if !stat.is_file() {
+                return None;
+            }
+            let mut file = fs::File::open(&path).ok()?;
+            let mut header = [0u8; 12];
+            file.read_exact(&mut header).ok()?;
+            if &header[..8] != MAGIC {
+                return None;
+            }
+            let length = u32::from_le_bytes(header[8..].try_into().ok()?) as usize;
+            if length > 64 * 1024 {
+                return None;
+            }
+            let mut metadata = vec![0; length];
+            file.read_exact(&mut metadata).ok()?;
+            let metadata: VariantMetadata = serde_json::from_slice(&metadata).ok()?;
+            (metadata.version == 2 && matches(&metadata.url)).then_some((path, stat.len()))
+        })
+        .collect()
 }
 
 pub struct Lease {
@@ -335,6 +400,55 @@ mod tests {
         } else {
             Err("bad source".into())
         }
+    }
+
+    #[test]
+    fn matching_clear_counts_physical_bytes_preserves_originals_and_revokes_old_writes() {
+        let _serial = serial();
+        let dir = scratch("blob-matching");
+        let cache = Cache::new(dir.clone(), 64);
+        let epoch = cache.generation();
+        for key in ["chapter:original", "chapter:thumb:page"] {
+            assert!(
+                cache
+                    .put_if_current(key, b"native tall page", epoch, inspect, || true)
+                    .unwrap()
+            );
+        }
+        fs::write(dir.join("unowned.txt"), b"keep").unwrap();
+        let matched = cache.usage_matching(|key| key.contains(":thumb:"));
+        assert_eq!(matched.1, 1);
+        assert!(matched.0 > b"native tall page".len() as u64);
+        assert_eq!(cache.clear_matching(|key| key.contains(":thumb:")), matched);
+        assert_eq!(cache.usage_matching(|key| key.contains(":thumb:")), (0, 0));
+        assert_eq!(
+            cache.get("chapter:original", inspect).unwrap().unwrap(),
+            b"native tall page"
+        );
+        assert!(
+            !cache
+                .put_if_current(
+                    "chapter:thumb:late",
+                    b"native tall page",
+                    epoch,
+                    inspect,
+                    || true
+                )
+                .unwrap()
+        );
+        assert!(
+            cache
+                .put_if_current(
+                    "chapter:thumb:new",
+                    b"native tall page",
+                    cache.generation(),
+                    inspect,
+                    || true
+                )
+                .unwrap()
+        );
+        assert_eq!(fs::read(dir.join("unowned.txt")).unwrap(), b"keep");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
