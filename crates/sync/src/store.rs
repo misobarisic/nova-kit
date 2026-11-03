@@ -376,6 +376,18 @@ impl Store {
         self.extra.insert(key.to_string(), value);
     }
 
+    /// Pending extra keys in this prefix, including queued removals. This is
+    /// read-only and does not scan durable storage. Transactions that delete a
+    /// namespace must combine these with durable keys so queued-only writes
+    /// cannot survive cleanup and publish secrets in the same save.
+    pub fn queued_extra_keys_with_prefix(&self, prefix: &str) -> Vec<String> {
+        self.extra
+            .range(prefix.to_owned()..)
+            .take_while(|(key, _)| key.starts_with(prefix))
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
     pub fn extra_value(&self, key: &str) -> Result<Option<String>> {
         match self.extra.get(key) {
             Some(v) => Ok(v.clone()),
@@ -400,7 +412,7 @@ impl Store {
         domain: &str,
         basis: &BTreeMap<String, Version>,
     ) -> Result<()> {
-        if self.digest().get(domain) == Some(basis) {
+        if self.domain_matches_digest(domain, basis) {
             if self.pending_domains.remove(domain) {
                 self.clock_dirty = true;
             }
@@ -576,6 +588,28 @@ impl Store {
     /// advance this clock, without requiring a copy of the complete digest.
     pub fn clock(&self) -> Hlc {
         self.hlc
+    }
+
+    /// Snapshot only one domain, including tombstones. An absent domain is
+    /// distinct from a present domain with no records.
+    pub fn domain_digest(&self, domain: &str) -> Option<BTreeMap<String, Version>> {
+        self.domains.get(domain).map(|keys| {
+            keys.iter()
+                .map(|(key, record)| (key.clone(), record.version))
+                .collect()
+        })
+    }
+
+    fn domain_matches_digest(&self, domain: &str, basis: &BTreeMap<String, Version>) -> bool {
+        self.domains.get(domain).is_some_and(|keys| {
+            keys.len() == basis.len()
+                && keys
+                    .iter()
+                    .zip(basis.iter())
+                    .all(|((key, record), (other, version))| {
+                        key == other && record.version == *version
+                    })
+        })
     }
 
     pub fn digest(&self) -> Digest {
@@ -766,6 +800,269 @@ fn migrate_legacy(value: &mut serde_json::Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    struct AllocationCounts {
+        calls: usize,
+        bytes: usize,
+    }
+    thread_local! {
+        static ALLOCATION_COUNTS: std::cell::Cell<Option<AllocationCounts>> = const { std::cell::Cell::new(None) };
+    }
+    struct CountingAllocator;
+    #[global_allocator]
+    static TEST_ALLOCATOR: CountingAllocator = CountingAllocator;
+    fn record_allocation(bytes: usize) {
+        let _ = ALLOCATION_COUNTS.try_with(|slot| {
+            if let Some(mut counts) = slot.get() {
+                counts.calls += 1;
+                counts.bytes += bytes;
+                slot.set(Some(counts));
+            }
+        });
+    }
+    unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            let result = unsafe { std::alloc::System.alloc(layout) };
+            if !result.is_null() {
+                record_allocation(layout.size());
+            }
+            result
+        }
+        unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+            let result = unsafe { std::alloc::System.alloc_zeroed(layout) };
+            if !result.is_null() {
+                record_allocation(layout.size());
+            }
+            result
+        }
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+            unsafe {
+                std::alloc::System.dealloc(pointer, layout);
+            }
+        }
+        unsafe fn realloc(
+            &self,
+            pointer: *mut u8,
+            layout: std::alloc::Layout,
+            size: usize,
+        ) -> *mut u8 {
+            let result = unsafe { std::alloc::System.realloc(pointer, layout, size) };
+            if !result.is_null() {
+                record_allocation(size);
+            }
+            result
+        }
+    }
+    fn count_allocations<T>(f: impl FnOnce() -> T) -> (T, AllocationCounts) {
+        struct Restore(Option<AllocationCounts>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                ALLOCATION_COUNTS.with(|slot| slot.set(self.0));
+            }
+        }
+        let previous =
+            ALLOCATION_COUNTS.with(|slot| slot.replace(Some(AllocationCounts::default())));
+        let _restore = Restore(previous);
+        let result = f();
+        let counts = ALLOCATION_COUNTS.with(|slot| slot.get().unwrap());
+        (result, counts)
+    }
+
+    #[test]
+    fn domain_digest_preserves_full_digest_semantics_tombstones_and_empty_domains() {
+        let mut store = super::Store::default();
+        store.set("profile:alice:progress", "live", Some("value".into()), 0, 1);
+        store.set("profile:alice:progress", "deleted", None, 0, 1);
+        store.set("profile:bob:library", "live", Some("other".into()), 0, 2);
+        store
+            .domains
+            .insert("empty".into(), std::collections::BTreeMap::new());
+        for domain in [
+            "profile:alice:progress",
+            "profile:bob:library",
+            "empty",
+            "absent",
+        ] {
+            assert_eq!(
+                store.domain_digest(domain),
+                store.digest().get(domain).cloned()
+            );
+        }
+        let digest = store.domain_digest("profile:alice:progress").unwrap();
+        assert_eq!(digest.len(), 2);
+        assert!(digest["deleted"].deleted);
+        assert_eq!(
+            store.domain_digest("empty"),
+            Some(std::collections::BTreeMap::new())
+        );
+        assert_eq!(store.domain_digest("absent"), None);
+    }
+
+    #[test]
+    fn domain_comparison_rejects_every_stale_key_or_version_without_global_digest() {
+        let mut store = super::Store::default();
+        store.set("selected", "a", Some("one".into()), 0, 1);
+        let basis = store.domain_digest("selected").unwrap();
+        assert!(store.domain_matches_digest("selected", &basis));
+        assert!(!store.domain_matches_digest("absent", &std::collections::BTreeMap::new()));
+        store
+            .domains
+            .insert("empty".into(), std::collections::BTreeMap::new());
+        assert!(store.domain_matches_digest("empty", &std::collections::BTreeMap::new()));
+        store.set("unrelated", "a", Some("changed".into()), 0, 2);
+        assert!(store.domain_matches_digest("selected", &basis));
+        let mut changed = store.clone();
+        changed.set("selected", "a", Some("two".into()), 0, 1);
+        assert!(!changed.domain_matches_digest("selected", &basis));
+        let mut added = store.clone();
+        added.set("selected", "b", Some("two".into()), 0, 1);
+        assert!(!added.domain_matches_digest("selected", &basis));
+        let mut removed = store.clone();
+        removed.remove_migrated_record("selected", "a");
+        assert!(!removed.domain_matches_digest("selected", &basis));
+        let mut replaced = removed.clone();
+        replaced.set("selected", "other", Some("one".into()), 0, 1);
+        assert!(!replaced.domain_matches_digest("selected", &basis));
+        let mut tombstoned = store.clone();
+        tombstoned.set("selected", "a", None, 0, 1);
+        assert!(!tombstoned.domain_matches_digest("selected", &basis));
+        let tombstone_basis = tombstoned.domain_digest("selected").unwrap();
+        assert!(tombstoned.domain_matches_digest("selected", &tombstone_basis));
+        tombstoned.set("selected", "a", Some("resurrected".into()), 0, 1);
+        assert!(!tombstoned.domain_matches_digest("selected", &tombstone_basis));
+    }
+
+    #[test]
+    fn domain_equality_check_allocates_nothing_for_matches_and_mismatches() {
+        let mut store = super::Store::default();
+        for i in 0..1000 {
+            store.set("unrelated", &format!("key-{i}"), Some("value".into()), 0, 1);
+        }
+        store.set("selected", "live", Some("value".into()), 0, 1);
+        store.set("selected", "deleted", None, 0, 1);
+        let basis = store.domain_digest("selected").unwrap();
+        let empty = std::collections::BTreeMap::new();
+        let (matches, allocations) = count_allocations(|| {
+            (
+                store.domain_matches_digest("selected", &basis),
+                store.domain_matches_digest("selected", &empty),
+                store.domain_matches_digest("absent", &empty),
+            )
+        });
+        assert_eq!(matches, (true, false, false));
+        assert_eq!(allocations, AllocationCounts::default());
+    }
+
+    #[test]
+    fn projection_acknowledgement_retains_original_basis_and_save_behavior() {
+        let mut store = super::Store::default();
+        store.set("selected", "a", Some("one".into()), 0, 1);
+        let old = store.domain_digest("selected").unwrap();
+        store.set("selected", "a", Some("two".into()), 0, 1);
+        store.mark_pending("selected");
+        store.queue_extra("unrelated-extra", Some("keep".into()));
+        // A blocked Store makes an attempted save observable without I/O.
+        store.blocked = true;
+        let before = format!("{store:?}");
+        store.mark_projected("selected", &old).unwrap();
+        assert_eq!(
+            format!("{store:?}"),
+            before,
+            "stale basis must not attempt save or mutate pending/extras"
+        );
+        let current = store.domain_digest("selected").unwrap();
+        assert!(
+            store.mark_projected("selected", &current).is_err(),
+            "matching basis must retain the existing save call"
+        );
+        assert!(!store.pending_domains().contains(&"selected".to_string()));
+        assert!(
+            store.extra.contains_key("unrelated-extra"),
+            "failed save retains dirty extras under existing Store contract"
+        );
+        store.mark_pending("absent");
+        let before = format!("{store:?}");
+        store
+            .mark_projected("absent", &std::collections::BTreeMap::new())
+            .unwrap();
+        assert_eq!(format!("{store:?}"), before, "absent is not present-empty");
+    }
+
+    #[test]
+    fn queued_extra_prefix_keys_include_pending_removals_without_mutating_store() {
+        let mut store = super::Store::default();
+        store.queue_extra("profile:alice:tracking:credentials", Some("private".into()));
+        store.queue_extra("profile:alice:removed", None);
+        store.queue_extra("profile:alice2:tracking:credentials", Some("other".into()));
+        store.queue_extra(
+            "sync:baseline:profile:alice:tracking",
+            Some("baseline".into()),
+        );
+        let before = format!("{store:?}");
+        assert_eq!(
+            store.queued_extra_keys_with_prefix("profile:alice:"),
+            vec![
+                "profile:alice:removed",
+                "profile:alice:tracking:credentials"
+            ]
+        );
+        assert_eq!(
+            store.queued_extra_keys_with_prefix("sync:baseline:profile:alice:"),
+            vec!["sync:baseline:profile:alice:tracking"]
+        );
+        assert!(store.queued_extra_keys_with_prefix("absent:").is_empty());
+        assert_eq!(format!("{store:?}"), before);
+    }
+
+    #[test]
+    fn staged_prefix_removal_preserves_failed_live_extras_and_unrelated_work() {
+        let mut live = super::Store::default();
+        live.queue_extra("profile:alice:credentials", Some("private".into()));
+        live.queue_extra(
+            "sync:baseline:profile:alice:tracking",
+            Some("baseline".into()),
+        );
+        live.queue_extra("profile:bob:credentials", Some("keep".into()));
+        let before = format!("{live:?}");
+        let mut staged = live.clone();
+        for prefix in ["profile:alice:", "sync:baseline:profile:alice:"] {
+            for key in staged.queued_extra_keys_with_prefix(prefix) {
+                staged.queue_extra(&key, None);
+            }
+        }
+        assert!(
+            staged
+                .save_with(|_| Err(nova_storage::Error::new(
+                    nova_storage::ErrorKind::Transaction,
+                    "injected failure"
+                )))
+                .is_err()
+        );
+        assert_eq!(format!("{live:?}"), before);
+        // An unrelated successful retry of the original live store still owns
+        // the original writes, never the failed candidate's removals.
+        let mut batch = Vec::new();
+        live.save_with(|rows| {
+            batch = rows.to_vec();
+            Ok(())
+        })
+        .unwrap();
+        assert!(batch.contains(&("profile:alice:credentials".into(), Some("private".into()))));
+        assert!(batch.contains(&(
+            "sync:baseline:profile:alice:tracking".into(),
+            Some("baseline".into())
+        )));
+        staged
+            .save_with(|rows| {
+                batch = rows.to_vec();
+                Ok(())
+            })
+            .unwrap();
+        assert!(batch.contains(&("profile:alice:credentials".into(), None)));
+        assert!(batch.contains(&("sync:baseline:profile:alice:tracking".into(), None)));
+        assert!(batch.contains(&("profile:bob:credentials".into(), Some("keep".into()))));
+    }
+
     #[test]
     #[cfg(feature = "nova-progress")]
     fn profile_progress_keeps_actions_and_aliases_separate() {
