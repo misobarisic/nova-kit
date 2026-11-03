@@ -196,6 +196,7 @@ pub(super) fn touch_decoded(key: &str) {
 }
 
 pub(super) fn record_variant(path: &Path, metadata: &VariantMetadata, bytes: u64) {
+    variant_index_record(path);
     let Some(directory) = path.parent() else {
         return;
     };
@@ -243,6 +244,7 @@ pub(super) fn record_existing(path: &Path, metadata: &VariantMetadata) {
 }
 
 pub(super) fn removed(path: &Path) {
+    variant_index_removed(path);
     if let Some(directory) = path.parent()
         && let Some(tracker) = tracker(directory)
         && let Some(name) = path.file_name().and_then(|name| name.to_str())
@@ -269,6 +271,7 @@ pub(super) fn mark_invalid(path: &Path) {
 }
 
 pub(super) fn cleared(directory: &Path) {
+    variant_index_cleared(directory);
     if let Some(tracker) = tracker(directory) {
         let mut state = tracker.state.lock().unwrap();
         let epoch = state.epoch.wrapping_add(1);
@@ -734,18 +737,23 @@ impl Tracker {
                 continue;
             }
             let path = self.directory.join(&name);
+            let mut index_removed = false;
             match fs::symlink_metadata(&path) {
                 Ok(stat)
                     if stat.is_file()
                         && stat.len() == candidate.bytes
                         && modified(&stat) == candidate.modified =>
                 {
-                    fs::remove_file(path)?;
+                    fs::remove_file(&path)?;
+                    index_removed = true;
                     state.remove(&name);
                     report.removed_files += 1;
                     report.removed_bytes = report.removed_bytes.saturating_add(candidate.bytes);
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => state.remove(&name),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    index_removed = true;
+                    state.remove(&name);
+                }
                 Err(error) => return Err(error),
                 _ => {
                     deferred = true;
@@ -753,6 +761,9 @@ impl Tracker {
             }
             checked_revision.insert(group, state.revision);
             drop(state);
+            if index_removed {
+                variant_index_removed(&path);
+            }
             drop(_guard);
             drop(_mutation);
             drop(_maintenance);

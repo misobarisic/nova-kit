@@ -100,9 +100,10 @@ impl Cache {
             },
             encoded: bytes.to_vec(),
         };
-        write_variant_if(
+        write_variant_if_with_limit(
             &recipe_disk_path(&self.directory, key, recipe()),
             &variant,
+            self.max_entry_bytes,
             still_current,
         )
         .map_err(|e| e.to_string())
@@ -169,7 +170,7 @@ impl Cache {
             }
         }
         if valid_size
-            && let Some(variant) = read_variant(&path)
+            && let Some(variant) = read_variant_with_limit(&path, self.max_entry_bytes)
             && variant.metadata.url == key
             && variant.metadata.recipe == recipe()
             && variant.encoded.len() as u64 <= self.max_entry_bytes
@@ -245,7 +246,12 @@ impl Cache {
                 encoded: bytes,
             };
             if fs::create_dir_all(&self.directory).is_ok() {
-                let _ = write_variant(&recipe_disk_path(&self.directory, key, recipe()), &variant);
+                let _ = write_variant_if_with_limit(
+                    &recipe_disk_path(&self.directory, key, recipe()),
+                    &variant,
+                    self.max_entry_bytes,
+                    || true,
+                );
             }
             Ok(variant.encoded)
         }))
@@ -499,6 +505,35 @@ mod tests {
         cache.clear();
         assert_eq!(fs::read(dir.join("unowned.txt")).unwrap(), b"keep");
         assert_eq!(cache.usage(), (0, 0));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn configured_blob_allowances_remain_independent_of_image_limit() {
+        let _serial = serial();
+        let dir = scratch("blob-bounds");
+        let wide = Cache::new(dir.clone(), 64);
+        let narrow = Cache::new(dir.clone(), 8);
+        let data = b"native tall page";
+        assert!(
+            wide.put_if_current("page", data, wide.generation(), inspect, || true)
+                .unwrap()
+        );
+        assert_eq!(wide.get("page", inspect).unwrap().unwrap(), data);
+        assert!(narrow.get("page", inspect).unwrap().is_none());
+        assert!(!recipe_disk_path(&dir, "page", recipe()).exists());
+        // Generic blob callers can explicitly allow entries above image32MiB.
+        let large = Cache::new(dir.clone(), image_encoded_byte_limit() + 1);
+        let bytes = vec![7; (image_encoded_byte_limit() + 1) as usize];
+        assert!(
+            large
+                .put_if_current("large", &bytes, large.generation(), |_| Ok((1, 1)), || true)
+                .unwrap()
+        );
+        assert_eq!(
+            large.get("large", |_| Ok((1, 1))).unwrap().unwrap().len(),
+            bytes.len()
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 

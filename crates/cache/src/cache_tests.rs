@@ -28,6 +28,106 @@ fn public_decoded_lru_reports_evictions_and_prioritizes_visible_keys_with_a_hard
 }
 
 #[test]
+fn decoded_lru_reports_multi_victim_evictions_in_policy_order() {
+    let mut cache = DecodedCache::new(64);
+    let pixels = || SharedPixelBuffer::<Rgba8Pixel>::new(4, 1);
+    for key in ["a", "b", "c", "d"] {
+        assert!(cache.insert(key.into(), pixels()).is_empty());
+    }
+    cache.set_protected(HashSet::from(["a".into(), "c".into()]));
+    assert_eq!(cache.set_budget(16), ["b", "d", "a"]);
+    assert_eq!(cache.keys_by_recency(), ["c"]);
+    assert_eq!(cache.stats(), (1, 16));
+    cache.set_protected(HashSet::new());
+    assert_eq!(cache.set_budget(0), ["c"]);
+    assert_eq!(cache.stats(), (0, 0));
+}
+
+#[test]
+fn decoded_lru_reports_rejected_replacements_and_keeps_survivors() {
+    let mut cache = DecodedCache::new(32);
+    let pixels = || SharedPixelBuffer::<Rgba8Pixel>::new(4, 1);
+    cache.insert("a".into(), pixels());
+    cache.insert("b".into(), pixels());
+    assert!(cache.insert("a".into(), pixels()).is_empty());
+    assert_eq!(cache.keys_by_recency(), ["b", "a"]);
+    assert_eq!(cache.insert("c".into(), pixels()), ["b"]);
+    assert_eq!(
+        cache.insert("a".into(), SharedPixelBuffer::<Rgba8Pixel>::new(9, 1)),
+        ["a"]
+    );
+    assert_eq!(cache.stats(), (1, 16));
+    assert_eq!(cache.keys_by_recency(), ["c"]);
+    assert_eq!(
+        cache.insert(
+            "new-oversize".into(),
+            SharedPixelBuffer::<Rgba8Pixel>::new(9, 1)
+        ),
+        ["new-oversize"]
+    );
+    assert_eq!(cache.stats(), (1, 16));
+}
+
+#[test]
+fn decoded_lru_unpinning_restores_normal_victim_selection() {
+    let mut cache = DecodedCache::new(32);
+    let pixels = || SharedPixelBuffer::<Rgba8Pixel>::new(4, 1);
+    cache.insert("a".into(), pixels());
+    cache.insert("b".into(), pixels());
+    cache.set_protected(HashSet::from(["a".into()]));
+    assert_eq!(cache.insert("c".into(), pixels()), ["b"]);
+    assert!(cache.set_protected(HashSet::new()).is_empty());
+    assert_eq!(cache.insert("d".into(), pixels()), ["a"]);
+    cache.set_protected(HashSet::from(["c".into(), "d".into()]));
+    assert_eq!(cache.set_budget(0), ["c", "d"]);
+    assert_eq!(cache.stats(), (0, 0));
+    cache.set_budget(16);
+    cache.insert("pinned".into(), pixels());
+    cache.set_protected(HashSet::from(["pinned".into()]));
+    assert_eq!(cache.insert("new".into(), pixels()), ["new"]);
+    assert_eq!(cache.keys_by_recency(), ["pinned"]);
+}
+
+#[test]
+fn decoded_lru_eviction_sets_match_previous_snapshot_reporting() {
+    let mut cache = DecodedCache::new(64);
+    let mut seed = 0x6a09e667f3bcc909u64;
+    for step in 0..1000 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let key = format!("key-{}", (seed >> 32) % 11);
+        let before = cache.map.keys().cloned().collect::<Vec<_>>();
+        let inserted = (step % 5 <= 2).then(|| key.clone());
+        let mut reported = match step % 5 {
+            0..=2 => cache.insert(
+                key.clone(),
+                SharedPixelBuffer::<Rgba8Pixel>::new(((seed >> 48) % 24 + 1) as u32, 1),
+            ),
+            3 => cache.set_budget(((seed >> 40) % 96) as usize),
+            _ => cache.set_protected(HashSet::from([key.clone()])),
+        };
+        // The former public API compared all keys before and after mutation.
+        let mut expected = before
+            .into_iter()
+            .filter(|key| !cache.contains(key))
+            .collect::<Vec<_>>();
+        if let Some(key) = inserted
+            && !cache.contains(&key)
+            && !expected.contains(&key)
+        {
+            expected.push(key);
+        }
+        reported.sort();
+        expected.sort();
+        assert_eq!(reported, expected, "operation {step}");
+        assert_eq!(
+            cache.total_bytes,
+            cache.map.values().map(|entry| entry.bytes).sum::<usize>()
+        );
+        assert!(cache.total_bytes <= cache.max_bytes);
+    }
+}
+
+#[test]
 fn guarded_atomic_publication_checks_after_private_staging_and_keeps_previous_file() {
     let _serial = serial();
     let dir = scratch("guarded-atomic");
@@ -1991,4 +2091,742 @@ fn jpeg_transcode_is_opt_in_and_skipped_for_resizing_or_non_jpeg() {
             .encoded
             .is_some()
     );
+}
+
+fn bounded_variant_fixture(encoded: Vec<u8>) -> DiskVariant {
+    DiskVariant {
+        metadata: VariantMetadata {
+            version: 2,
+            url: "bounded-fixture".into(),
+            uses: vec![ImageUse::Fixed(None)],
+            width: 1,
+            height: 1,
+            recipe: ImageRecipe {
+                max_side: None,
+                compress: false,
+                format: None,
+                quality: 0,
+                jxl_lossless_jpeg: false,
+            },
+            checksum: fnv1a(&encoded),
+        },
+        encoded,
+    }
+}
+fn bounded_variant_envelope(variant: &DiskVariant) -> Vec<u8> {
+    let metadata = serde_json::to_vec(&variant.metadata).unwrap();
+    let mut data = MAGIC.to_vec();
+    data.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
+    data.extend_from_slice(&metadata);
+    data.extend_from_slice(&variant.encoded);
+    data
+}
+
+#[test]
+fn variant_reader_bounds_actual_payload_for_missing_and_dishonest_length_hints() {
+    use std::io::Read;
+    struct Counted {
+        reader: std::io::Cursor<Vec<u8>>,
+        consumed: usize,
+    }
+    impl Read for Counted {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.reader.read(bytes)?;
+            self.consumed += count;
+            Ok(count)
+        }
+    }
+    for size in [31, 32, 33] {
+        let variant = bounded_variant_fixture(vec![7; size]);
+        let envelope = bounded_variant_envelope(&variant);
+        let overhead = envelope.len() - size;
+        for hint in [None, Some(0), Some(envelope.len() as u64)] {
+            let mut reader = Counted {
+                reader: std::io::Cursor::new(envelope.clone()),
+                consumed: 0,
+            };
+            let result = read_variant_body(&mut reader, hint, 32);
+            assert!(reader.consumed <= overhead + 33);
+            if size <= 32 {
+                assert_eq!(result.unwrap().encoded, variant.encoded);
+            } else {
+                assert!(result.is_err());
+            }
+        }
+    }
+    let mut growing = bounded_variant_envelope(&bounded_variant_fixture(vec![7; 32]));
+    let initial_size = growing.len() as u64;
+    growing.extend_from_slice(&[7; 1024]);
+    let mut reader = Counted {
+        reader: std::io::Cursor::new(growing),
+        consumed: 0,
+    };
+    assert!(read_variant_body(&mut reader, Some(initial_size), 32).is_err());
+    assert_eq!(reader.consumed as u64, initial_size + 1);
+}
+
+#[test]
+fn variant_reader_rejects_truncated_headers_metadata_and_corrupted_payloads() {
+    let normal = bounded_variant_envelope(&bounded_variant_fixture(vec![7; 32]));
+    for length in [0, 7, 8, 11, 12, normal.len() - 1] {
+        assert!(read_variant_body(&normal[..length], None, 32).is_err());
+    }
+    let mut excessive_metadata = MAGIC.to_vec();
+    excessive_metadata.extend_from_slice(&((MAX_VARIANT_METADATA_BYTES + 1) as u32).to_le_bytes());
+    assert!(read_variant_body(excessive_metadata.as_slice(), None, 32).is_err());
+    let mut corrupt = normal.clone();
+    *corrupt.last_mut().unwrap() ^= 1;
+    assert!(read_variant_body(corrupt.as_slice(), None, 32).is_err());
+    let mut variant = bounded_variant_fixture(vec![7; 32]);
+    variant.metadata.version = 1;
+    assert!(read_variant_body(bounded_variant_envelope(&variant).as_slice(), None, 32).is_err());
+    variant.metadata.version = 2;
+    variant.metadata.uses.clear();
+    assert!(read_variant_body(bounded_variant_envelope(&variant).as_slice(), None, 32).is_err());
+    assert!(read_variant_body(normal.as_slice(), None, u64::MAX).is_err());
+}
+
+#[test]
+fn variant_file_reader_rejects_huge_sparse_files_without_removing_them() {
+    let _serial = serial();
+    let dir = scratch("bounded-variant-sparse");
+    let path = dir.join("sparse.variant");
+    fs::File::create(&path).unwrap().set_len(1 << 30).unwrap();
+    assert!(read_variant_with_limit(&path, 32).is_none());
+    assert_eq!(fs::metadata(&path).unwrap().len(), 1 << 30);
+    assert!(read_variant_with_limit(&dir, 32).is_none());
+    assert!(read_variant_with_limit(&dir.join("missing.variant"), 32).is_none());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn variant_writes_apply_matching_limits_and_keep_guarded_publication() {
+    let _serial = serial();
+    let dir = scratch("bounded-variant-write");
+    let path = dir.join("normal.variant");
+    for size in [31, 32] {
+        let variant = bounded_variant_fixture(vec![7; size]);
+        assert!(write_variant_if_with_limit(&path, &variant, 32, || true).unwrap());
+        assert_eq!(
+            read_variant_with_limit(&path, 32).unwrap().encoded,
+            variant.encoded
+        );
+    }
+    let previous = fs::read(&path).unwrap();
+    assert!(
+        write_variant_if_with_limit(&path, &bounded_variant_fixture(vec![7; 33]), 32, || true)
+            .is_err()
+    );
+    assert!(
+        !write_variant_if_with_limit(&path, &bounded_variant_fixture(vec![8; 32]), 32, || false)
+            .unwrap()
+    );
+    assert_eq!(fs::read(&path).unwrap(), previous);
+    let mut oversized_metadata = bounded_variant_fixture(vec![7; 32]);
+    oversized_metadata.metadata.url = "x".repeat(MAX_VARIANT_METADATA_BYTES + 1);
+    assert!(write_variant_if_with_limit(&path, &oversized_metadata, 32, || true).is_err());
+    assert_eq!(fs::read(&path).unwrap(), previous);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let link = dir.join("linked.variant");
+        symlink(&path, &link).unwrap();
+        assert!(read_variant_with_limit(&link, 32).is_some());
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn filename_index_merges_new_publications_deletions_and_clear_epochs() {
+    let _serial = serial();
+    let dir = scratch("filename-merge");
+    let mut variant = bounded_variant_fixture(vec![7; 8]);
+    let url = variant.metadata.url.clone();
+    let old = recipe_disk_path(&dir, &url, variant.metadata.recipe);
+    write_variant(&old, &variant).unwrap();
+    assert_eq!(indexed_url_paths(&dir, &url), [old.clone()]);
+    let scan = FilenameScan::begin(filename_index(&dir));
+    let observed = vec![old.file_name().unwrap().to_str().unwrap().to_owned()];
+    variant.metadata.recipe.quality = 1;
+    let new = recipe_disk_path(&dir, &url, variant.metadata.recipe);
+    write_variant(&new, &variant).unwrap();
+    fs::remove_file(&old).unwrap();
+    gc::removed(&old);
+    assert!(scan.publish(observed));
+    assert_eq!(indexed_url_paths(&dir, &url), [new.clone()]);
+    let stale = FilenameScan::begin(filename_index(&dir));
+    gc::cleared(&dir);
+    write_variant(&new, &variant).unwrap();
+    assert!(!stale.publish(Vec::new()));
+    assert_eq!(indexed_url_paths(&dir, &url), [new]);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn filename_inventory_enumerates_once_and_current_lookup_sees_later_writes() {
+    let _serial = serial();
+    let dir = scratch("filename-inventory");
+    for i in 0..100 {
+        let mut variant = bounded_variant_fixture(vec![7; 8]);
+        variant.metadata.url = format!("inventory/{i}");
+        write_variant(
+            &recipe_disk_path(&dir, &variant.metadata.url, variant.metadata.recipe),
+            &variant,
+        )
+        .unwrap();
+    }
+    FILENAME_WORK.with(|work| work.set((0, 0)));
+    let cancel = AtomicBool::new(false);
+    let inventory = VariantInventory::scan(
+        &dir,
+        &cancel,
+        CACHE_GENERATION.load(Ordering::Acquire),
+        |_| {},
+    )
+    .ok()
+    .unwrap();
+    assert_eq!(inventory.urls.len(), 100);
+    assert_eq!(FILENAME_WORK.with(|work| work.get()), (1, 100));
+    for url in &inventory.urls {
+        assert!(!use_registrations(&dir, url).is_empty());
+    }
+    let mut later = bounded_variant_fixture(vec![8; 8]);
+    later.metadata.url = "inventory/0".into();
+    later.metadata.recipe.quality = 1;
+    write_variant(
+        &recipe_disk_path(&dir, &later.metadata.url, later.metadata.recipe),
+        &later,
+    )
+    .unwrap();
+    assert_eq!(
+        use_registrations(&dir, "inventory/0")[&ImageUse::Fixed(None)].len(),
+        2
+    );
+    assert_eq!(FILENAME_WORK.with(|work| work.get()), (1, 100));
+    let path = recipe_disk_path(&dir, &later.metadata.url, later.metadata.recipe);
+    fs::remove_file(&path).unwrap();
+    assert_eq!(
+        use_registrations(&dir, "inventory/0")[&ImageUse::Fixed(None)].len(),
+        1
+    );
+    assert_eq!(indexed_url_paths(&dir, "inventory/0").len(), 1);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn filename_inventory_cancellation_observes_the_first_64_entry_checkpoint() {
+    let _serial = serial();
+    let dir = scratch("filename-cancel");
+    for i in 0..128 {
+        let mut variant = bounded_variant_fixture(vec![7; 8]);
+        variant.metadata.url = format!("cancel/{i}");
+        write_variant(
+            &recipe_disk_path(&dir, &variant.metadata.url, variant.metadata.recipe),
+            &variant,
+        )
+        .unwrap();
+    }
+    let cancel = AtomicBool::new(false);
+    FILENAME_WORK.with(|work| work.set((0, 0)));
+    let result = VariantInventory::scan(
+        &dir,
+        &cancel,
+        CACHE_GENERATION.load(Ordering::Acquire),
+        |seen| {
+            if seen >= 64 {
+                cancel.store(true, Ordering::Release);
+            }
+        },
+    );
+    assert!(matches!(result, Err(InventoryFailure::Cancelled)));
+    assert_eq!(FILENAME_WORK.with(|work| work.get()), (1, 65));
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), 128);
+    FILENAME_WORK.with(|work| work.set((0, 0)));
+    let report = rewrite_entries_with(
+        &dir,
+        &settings(),
+        &cancel,
+        |_| {},
+        |_| panic!("cancelled inventory must not fetch"),
+    );
+    assert!(report.cancelled);
+    assert_eq!(report.processed, 0);
+    assert_eq!(FILENAME_WORK.with(|work| work.get()), (0, 0));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn indexed_retirement_preserves_collision_checks_legacy_cleanup_and_failed_replacement() {
+    let _serial = serial();
+    let dir = scratch("filename-retire");
+    let variant = bounded_variant_fixture(vec![7; 8]);
+    let url = variant.metadata.url.clone();
+    let path = recipe_disk_path(&dir, &url, variant.metadata.recipe);
+    write_variant(&path, &variant).unwrap();
+    let mut foreign = bounded_variant_fixture(vec![8; 8]);
+    foreign.metadata.url = "foreign/url".into();
+    foreign.metadata.recipe.quality = 1;
+    let collision = recipe_disk_path(&dir, &url, foreign.metadata.recipe);
+    write_variant(&collision, &foreign).unwrap();
+    let legacy = dir.join(format!("{:016x}.img", fnv1a(url.as_bytes())));
+    fs::write(&legacy, b"legacy").unwrap();
+    assert_eq!(
+        use_registrations(&dir, &url)[&ImageUse::Fixed(None)].len(),
+        1
+    );
+    assert!(!write_variant_if(&path, &foreign, || false).unwrap());
+    retire_use_history(&dir, &url, &[ImageUse::Fixed(None)], &path);
+    assert!(path.exists());
+    assert!(collision.exists());
+    assert!(!legacy.exists());
+    assert_eq!(read_variant(&path).unwrap().metadata.url, url);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+fn core06_settings() -> CacheSettings {
+    CacheSettings {
+        cache_images: true,
+        enabled: false,
+        detail_poster_max_side: None,
+        detail_backdrop_max_side: None,
+        ..settings()
+    }
+}
+fn core06_populate(dir: &Path, url: &str) -> (CacheSettings, ImageRecipe, Pixels) {
+    let settings = core06_settings();
+    let recipe = ImageRecipe::resolve(ImageUse::Fixed(None), &settings);
+    let pixels = cached_pixels_with(dir, url, ImageUse::Fixed(None), &settings, || {
+        Some(source_image(16, 16, true))
+    })
+    .unwrap();
+    (settings, recipe, pixels)
+}
+fn core06_block_next_write(path: &Path) -> PathBuf {
+    let sequence = TEMP_SEQUENCE.load(Ordering::Relaxed);
+    let blocker = path.with_file_name(format!(
+        "{}.tmp-{}-{sequence}",
+        path.file_name().unwrap().to_string_lossy(),
+        std::process::id()
+    ));
+    fs::create_dir(&blocker).unwrap();
+    blocker
+}
+
+#[test]
+#[cfg(unix)]
+fn core06_warm_same_role_has_one_fingerprint_and_no_payload_work() {
+    let _serial = serial();
+    for size in [32 * 1024, 1024 * 1024] {
+        decoded_cache_clear();
+        let dir = scratch("core06-warm");
+        let url = "https://unit.test/core06-warm";
+        let settings = core06_settings();
+        let mut source = source_image(16, 16, true);
+        source.resize(size, 0);
+        let cold = cached_pixels_with(&dir, url, ImageUse::Fixed(None), &settings, || Some(source))
+            .unwrap();
+        REGISTRATION_WORK.with(|work| work.set((0, 0, 0)));
+        for _ in 0..32 {
+            let warm = cached_pixels_with(&dir, url, ImageUse::Fixed(None), &settings, || {
+                panic!("warm fetch")
+            })
+            .unwrap();
+            assert_eq!(warm.as_bytes().as_ptr(), cold.as_bytes().as_ptr());
+        }
+        assert_eq!(REGISTRATION_WORK.with(|work| work.get()), (32, 0, 0));
+        REGISTRATION_WORK.with(|work| work.set((0, 0, 0)));
+        assert!(
+            decoded_cache_get(&image_recipe_cache_key(
+                url,
+                ImageRecipe::resolve(ImageUse::Fixed(None), settings)
+            ))
+            .is_some()
+        );
+        assert_eq!(REGISTRATION_WORK.with(|work| work.get()), (0, 0, 0));
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn core06_new_role_requires_durable_registration_then_warms() {
+    let _serial = serial();
+    decoded_cache_clear();
+    let dir = scratch("core06-role");
+    let url = "https://unit.test/core06-role";
+    let (settings, recipe, pixels) = core06_populate(&dir, url);
+    REGISTRATION_WORK.with(|work| work.set((0, 0, 0)));
+    let role = cached_pixels_with(&dir, url, ImageUse::DetailPoster, &settings, || {
+        panic!("new role fetch")
+    })
+    .unwrap();
+    assert!(image_buffers_equal(&pixels, &role));
+    assert!(REGISTRATION_WORK.with(|work| work.get().1) > 0);
+    assert!(
+        read_variant(&recipe_disk_path(&dir, url, recipe))
+            .unwrap()
+            .metadata
+            .uses
+            .contains(&ImageUse::DetailPoster)
+    );
+    REGISTRATION_WORK.with(|work| work.set((0, 0, 0)));
+    assert!(
+        cached_pixels_with(&dir, url, ImageUse::DetailPoster, &settings, || panic!(
+            "registered fetch"
+        ))
+        .is_some()
+    );
+    assert_eq!(REGISTRATION_WORK.with(|work| work.get()), (1, 0, 0));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn core06_external_unlink_truncate_replace_and_rewrite_recover_current_pixels() {
+    let _serial = serial();
+    for mutation in 0..4 {
+        decoded_cache_clear();
+        let dir = scratch("core06-mutation");
+        let url = "https://unit.test/core06-mutation";
+        let (settings, recipe, old) = core06_populate(&dir, url);
+        let path = recipe_disk_path(&dir, url, recipe);
+        if mutation == 0 {
+            fs::remove_file(&path).unwrap();
+        } else if mutation == 1 {
+            fs::write(&path, b"truncated").unwrap();
+        } else {
+            let processed = process_source(source_image(12, 9, false), recipe).unwrap();
+            let variant = DiskVariant {
+                metadata: VariantMetadata {
+                    version: 2,
+                    url: url.into(),
+                    uses: vec![ImageUse::Fixed(None)],
+                    width: 12,
+                    height: 9,
+                    recipe,
+                    checksum: fnv1a(processed.encoded.as_ref().unwrap()),
+                },
+                encoded: processed.encoded.unwrap(),
+            };
+            let replacement = dir.join("external.variant");
+            write_variant(&replacement, &variant).unwrap();
+            if mutation == 2 {
+                fs::rename(replacement, &path).unwrap();
+            } else {
+                fs::write(&path, fs::read(replacement).unwrap()).unwrap();
+            }
+        }
+        let fetches = AtomicUsize::new(0);
+        let current = cached_pixels_with(&dir, url, ImageUse::Fixed(None), &settings, || {
+            fetches.fetch_add(1, Ordering::Relaxed);
+            Some(source_image(12, 9, false))
+        })
+        .unwrap();
+        assert!(!image_buffers_equal(&old, &current));
+        assert_eq!((current.width(), current.height()), (12, 9));
+        assert_eq!(fetches.load(Ordering::Relaxed), usize::from(mutation < 2));
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn core06_generations_revoke_proof_even_when_recipe_and_file_recur() {
+    let _serial = serial();
+    decoded_cache_clear();
+    let dir = scratch("core06-generation");
+    let url = "https://unit.test/core06-generation";
+    let (settings, recipe, _) = core06_populate(&dir, url);
+    let key = image_recipe_cache_key(url, recipe);
+    let (_, Some(proof)) = decoded_registration_snapshot(&key).unwrap() else {
+        panic!("proof");
+    };
+    CACHE_GENERATION.fetch_add(1, Ordering::AcqRel);
+    REGISTRATION_WORK.with(|work| work.set((0, 0, 0)));
+    cached_pixels_with(&dir, url, ImageUse::Fixed(None), &settings, || {
+        panic!("generation fetch")
+    })
+    .unwrap();
+    assert!(REGISTRATION_WORK.with(|work| work.get().1) > 0);
+    // Inject an older settings revision to model an A→B→A recipe recurrence.
+    let (publication, Some(mut stale)) = decoded_registration_snapshot(&key).unwrap() else {
+        panic!("proof");
+    };
+    Arc::make_mut(&mut stale).settings = stale.settings.wrapping_sub(1);
+    attach_registration(&key, publication, Some(stale));
+    REGISTRATION_WORK.with(|work| work.set((0, 0, 0)));
+    cached_pixels_with(&dir, url, ImageUse::Fixed(None), &settings, || {
+        panic!("ABA fetch")
+    })
+    .unwrap();
+    assert!(REGISTRATION_WORK.with(|work| work.get().1) > 0);
+    assert_ne!(proof.clear, CACHE_GENERATION.load(Ordering::Acquire));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn core06_failed_source_replacement_does_not_bind_new_pixels_to_old_file() {
+    let _serial = serial();
+    decoded_cache_clear();
+    let dir = scratch("core06-failed-source");
+    let url = "https://unit.test/core06-failed-source";
+    let (_, recipe, old) = core06_populate(&dir, url);
+    let path = recipe_disk_path(&dir, url, recipe);
+    let before = fs::read(&path).unwrap();
+    let blocker = core06_block_next_write(&path);
+    let ticket =
+        PublicationTicket::acquire(&dir, url, recipe, CACHE_GENERATION.load(Ordering::Acquire));
+    let new = publish_processed_locked(
+        &dir,
+        url,
+        &[ImageUse::Fixed(None)],
+        true,
+        &ticket,
+        process_source(source_image(12, 9, false), recipe),
+    )
+    .unwrap();
+    assert!(!image_buffers_equal(&old, &new));
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert!(
+        decoded_registration_snapshot(&image_recipe_cache_key(url, recipe))
+            .unwrap()
+            .1
+            .is_none()
+    );
+    register_refreshed_use_locked(&dir, url, ImageUse::DetailPoster, recipe, &new);
+    assert!(
+        !read_variant(&path)
+            .unwrap()
+            .metadata
+            .uses
+            .contains(&ImageUse::DetailPoster)
+    );
+    fs::remove_dir(blocker).unwrap();
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn core06_failed_role_write_never_proves_the_new_role() {
+    let _serial = serial();
+    decoded_cache_clear();
+    let dir = scratch("core06-failed-role");
+    let url = "https://unit.test/core06-failed-role";
+    let (_, recipe, pixels) = core06_populate(&dir, url);
+    let path = recipe_disk_path(&dir, url, recipe);
+    let blocker = core06_block_next_write(&path);
+    assert!(!register_cached_pixels_locked(
+        &dir,
+        url,
+        ImageUse::DetailPoster,
+        recipe,
+        &pixels
+    ));
+    assert!(
+        !read_variant(&path)
+            .unwrap()
+            .metadata
+            .uses
+            .contains(&ImageUse::DetailPoster)
+    );
+    assert!(
+        decoded_registration_snapshot(&image_recipe_cache_key(url, recipe))
+            .unwrap()
+            .1
+            .is_none()
+    );
+    fs::remove_dir(blocker).unwrap();
+    assert!(register_cached_pixels_locked(
+        &dir,
+        url,
+        ImageUse::DetailPoster,
+        recipe,
+        &pixels
+    ));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn core06_memory_only_lossy_load_fetches_original_when_disk_is_enabled() {
+    let _serial = serial();
+    decoded_cache_clear();
+    let dir = scratch("core06-enable-disk");
+    let url = "https://unit.test/core06-enable-disk";
+    let mut settings = CacheSettings {
+        cache_images: false,
+        enabled: true,
+        format: CacheImageFormat::Jpeg,
+        quality: 20,
+        ..settings()
+    };
+    let source = source_image(40, 30, false);
+    let memory = cached_pixels_with(&dir, url, ImageUse::Fixed(Some(20)), &settings, || {
+        Some(source.clone())
+    })
+    .unwrap();
+    settings.cache_images = true;
+    let fetches = AtomicUsize::new(0);
+    let disk = cached_pixels_with(&dir, url, ImageUse::Fixed(Some(20)), &settings, || {
+        fetches.fetch_add(1, Ordering::Relaxed);
+        Some(source)
+    })
+    .unwrap();
+    assert_eq!(fetches.load(Ordering::Relaxed), 1);
+    assert!(image_buffers_equal(&memory, &disk));
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn core06_directory_identity_prevents_cross_namespace_proof_reuse() {
+    let _serial = serial();
+    decoded_cache_clear();
+    let dir = scratch("core06-dir-a");
+    let other = scratch("core06-dir-b");
+    let url = "https://unit.test/core06-dir";
+    let (settings, _, old) = core06_populate(&dir, url);
+    let new = cached_pixels_with(&other, url, ImageUse::Fixed(None), &settings, || {
+        Some(source_image(12, 9, false))
+    })
+    .unwrap();
+    assert!(!image_buffers_equal(&old, &new));
+    let recovered = cached_pixels_with(&dir, url, ImageUse::Fixed(None), &settings, || {
+        panic!("first directory still durable")
+    })
+    .unwrap();
+    assert!(image_buffers_equal(&old, &recovered));
+    fs::remove_dir_all(dir).unwrap();
+    fs::remove_dir_all(other).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn core06_lru_replacement_eviction_remove_and_clear_bound_evidence_lifetime() {
+    let _serial = serial();
+    decoded_cache_clear();
+    let dir = scratch("core06-lifetime");
+    let url = "https://unit.test/core06-lifetime";
+    let (_, recipe, pixels) = core06_populate(&dir, url);
+    let key = image_recipe_cache_key(url, recipe);
+    let (old_id, old_proof) = decoded_registration_snapshot(&key).unwrap();
+    assert!(old_proof.is_some());
+    decoded_cache_insert(&key, pixels.clone());
+    let (new_id, new_proof) = decoded_registration_snapshot(&key).unwrap();
+    assert_ne!(old_id, new_id);
+    assert!(new_proof.is_none());
+    attach_registration(&key, old_id, old_proof.clone());
+    assert!(decoded_registration_snapshot(&key).unwrap().1.is_none());
+    attach_registration(&key, new_id, old_proof.clone());
+    {
+        let mut cache = DECODED_POSTERS.lock().unwrap();
+        cache.remove(&key);
+    }
+    assert!(decoded_registration_snapshot(&key).is_none());
+    decoded_cache_insert_registered(&key, pixels.clone(), old_proof.clone());
+    set_decoded_cache_budget(0);
+    assert!(decoded_registration_snapshot(&key).is_none());
+    decoded_cache_insert_registered(&key, pixels.clone(), old_proof.clone());
+    assert!(decoded_registration_snapshot(&key).is_none());
+    set_decoded_cache_budget(128);
+    decoded_cache_insert_registered(&key, pixels, old_proof);
+    decoded_cache_clear();
+    assert!(decoded_registration_snapshot(&key).is_none());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn core06_joined_registration_reuses_proof_but_unknown_pixels_require_comparison() {
+    let _serial = serial();
+    decoded_cache_clear();
+    let dir = scratch("core06-joined");
+    let url = "https://unit.test/core06-joined";
+    let (_, recipe, pixels) = core06_populate(&dir, url);
+    REGISTRATION_WORK.with(|work| work.set((0, 0, 0)));
+    register_refreshed_use_locked(&dir, url, ImageUse::Fixed(None), recipe, &pixels);
+    assert_eq!(REGISTRATION_WORK.with(|work| work.get()), (1, 0, 0));
+    let alien = SharedPixelBuffer::<Rgba8Pixel>::new(16, 16);
+    decoded_cache_insert(&image_recipe_cache_key(url, recipe), alien.clone());
+    REGISTRATION_WORK.with(|work| work.set((0, 0, 0)));
+    assert!(!register_cached_pixels_locked(
+        &dir,
+        url,
+        ImageUse::DetailPoster,
+        recipe,
+        &alien
+    ));
+    assert!(REGISTRATION_WORK.with(|work| work.get().2) > 0);
+    assert!(
+        decoded_registration_snapshot(&image_recipe_cache_key(url, recipe))
+            .unwrap()
+            .1
+            .is_none()
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn core06_symlink_retargeting_or_unsupported_identity_uses_full_validation() {
+    let _serial = serial();
+    decoded_cache_clear();
+    let dir = scratch("core06-symlink");
+    let url = "https://unit.test/core06-symlink";
+    let (settings, recipe, old) = core06_populate(&dir, url);
+    let path = recipe_disk_path(&dir, url, recipe);
+    #[cfg(unix)]
+    {
+        let original = dir.join("original");
+        fs::rename(&path, &original).unwrap();
+        std::os::unix::fs::symlink(&original, &path).unwrap();
+        let first = cached_pixels_with(&dir, url, ImageUse::Fixed(None), &settings, || {
+            panic!("same symlink target")
+        })
+        .unwrap();
+        assert!(image_buffers_equal(&old, &first));
+        let other = dir.join("other");
+        let processed = process_source(source_image(12, 9, false), recipe).unwrap();
+        let variant = DiskVariant {
+            metadata: VariantMetadata {
+                version: 2,
+                url: url.into(),
+                uses: vec![ImageUse::Fixed(None)],
+                width: 12,
+                height: 9,
+                recipe,
+                checksum: fnv1a(processed.encoded.as_ref().unwrap()),
+            },
+            encoded: processed.encoded.unwrap(),
+        };
+        write_variant(&other, &variant).unwrap();
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&other, &path).unwrap();
+        let current = cached_pixels_with(&dir, url, ImageUse::Fixed(None), &settings, || {
+            panic!("replacement symlink target")
+        })
+        .unwrap();
+        assert!(!image_buffers_equal(&old, &current));
+    }
+    #[cfg(not(unix))]
+    {
+        assert!(file_fingerprint(&path).is_none());
+        assert!(
+            decoded_registration_snapshot(&image_recipe_cache_key(url, recipe))
+                .unwrap()
+                .1
+                .is_none()
+        );
+        REGISTRATION_WORK.with(|work| work.set((0, 0, 0)));
+        let current = cached_pixels_with(&dir, url, ImageUse::Fixed(None), &settings, || {
+            panic!("full validation")
+        })
+        .unwrap();
+        assert!(image_buffers_equal(&old, &current));
+        assert!(REGISTRATION_WORK.with(|work| work.get().1) > 0);
+    }
+    fs::remove_dir_all(dir).unwrap();
 }

@@ -113,7 +113,61 @@ pub fn backdrop_pixels_cached(url: &str) -> Option<Pixels> {
     decoded_cache_get(&image_cache_key(url, ImageUse::DetailBackdrop))
 }
 
+// Evidence lives only as long as this exact decoded LRU publication.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileFingerprint {
+    device: u64,
+    inode: u64,
+    length: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+#[cfg(test)]
+thread_local! {
+    static REGISTRATION_WORK: std::cell::Cell<(usize, usize, usize)> = const { std::cell::Cell::new((0, 0, 0)) };
+}
+fn file_fingerprint(path: &Path) -> Option<FileFingerprint> {
+    #[cfg(test)]
+    REGISTRATION_WORK.with(|work| {
+        let (stats, reads, decodes) = work.get();
+        work.set((stats + 1, reads, decodes));
+    });
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(path).ok()?;
+        metadata.is_file().then(|| FileFingerprint {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            length: metadata.len(),
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        })
+    }
+    // Stable file identity is not available through our supported std API on
+    // other platforms. Full bounded validation remains authoritative there.
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+#[derive(Clone)]
+struct DiskRegistrationEvidence {
+    path: PathBuf,
+    clear: u64,
+    settings: u64,
+    recipe: ImageRecipe,
+    source_checksum: u64,
+    uses: Vec<ImageUse>,
+    fingerprint: FileFingerprint,
+}
+static DECODED_PUBLICATION: AtomicU64 = AtomicU64::new(0);
 struct ImageCacheEntry {
+    publication: u64,
+    // Disk-disabled/public LRU entries pay only one optional pointer. Cloning
+    // a snapshot shares immutable proof while filesystem work runs unlocked.
+    registration: Option<Arc<DiskRegistrationEvidence>>,
     pixels: Pixels,
     bytes: usize,
     last_use: u64,
@@ -158,30 +212,21 @@ impl DecodedCache {
         self.total_bytes = self.total_bytes.saturating_sub(old.bytes);
         Some(old.pixels)
     }
+    /// Update protection, reporting any removals in [`Self::set_budget`] order.
     pub fn set_protected(&mut self, keys: HashSet<String>) -> Vec<String> {
         self.protected = keys;
         self.set_budget(self.max_bytes)
     }
+    /// Removed keys in eviction order: oldest unprotected entries first, then
+    /// oldest protected entries if needed to enforce the hard byte budget.
     pub fn set_budget(&mut self, max_bytes: usize) -> Vec<String> {
-        let before = self.map.keys().cloned().collect::<Vec<_>>();
         self.max_bytes = max_bytes;
-        self.evict();
-        before
-            .into_iter()
-            .filter(|k| !self.map.contains_key(k))
-            .collect()
+        self.evict()
     }
+    /// Report only removed keys, in the same order as [`Self::set_budget`].
+    /// An oversized rejected key is reported even if it was not cached before.
     pub fn insert(&mut self, key: String, pixels: Pixels) -> Vec<String> {
-        let before = self.map.keys().cloned().collect::<Vec<_>>();
-        self.store_insert(key.clone(), pixels);
-        let mut evicted = before
-            .into_iter()
-            .filter(|k| !self.map.contains_key(k))
-            .collect::<Vec<_>>();
-        if !self.map.contains_key(&key) && !evicted.contains(&key) {
-            evicted.push(key);
-        }
-        evicted
+        self.store_insert(key, pixels)
     }
     fn touch_get(&mut self, key: &str) -> Option<Pixels> {
         self.clock = self.clock.wrapping_add(1);
@@ -189,27 +234,30 @@ impl DecodedCache {
         entry.last_use = self.clock;
         Some(entry.pixels.clone())
     }
-    fn store_insert(&mut self, key: String, pixels: Pixels) {
+    fn store_insert(&mut self, key: String, pixels: Pixels) -> Vec<String> {
         if let Some(old) = self.map.remove(&key) {
             self.total_bytes = self.total_bytes.saturating_sub(old.bytes);
         }
         let bytes = pixels.as_bytes().len();
         if bytes > self.max_bytes {
-            return;
+            return vec![key];
         }
         self.clock = self.clock.wrapping_add(1);
         self.map.insert(
             key,
             ImageCacheEntry {
+                publication: DECODED_PUBLICATION.fetch_add(1, Ordering::Relaxed),
+                registration: None,
                 pixels,
                 bytes,
                 last_use: self.clock,
             },
         );
         self.total_bytes = self.total_bytes.saturating_add(bytes);
-        self.evict();
+        self.evict()
     }
-    fn evict(&mut self) {
+    fn evict(&mut self) -> Vec<String> {
+        let mut evicted = Vec::new();
         while self.total_bytes > self.max_bytes {
             let Some(key) = self
                 .map
@@ -228,8 +276,10 @@ impl DecodedCache {
             };
             if let Some(old) = self.map.remove(&key) {
                 self.total_bytes = self.total_bytes.saturating_sub(old.bytes);
+                evicted.push(key);
             }
         }
+        evicted
     }
     pub fn clear(&mut self) {
         self.map.clear();
@@ -249,7 +299,7 @@ static DECODED_POSTERS: LazyLock<Mutex<DecodedCache>> = LazyLock::new(|| {
 pub fn set_decoded_cache_budget(mb: u32) {
     let mut cache = DECODED_POSTERS.lock().unwrap();
     cache.max_bytes = (mb as usize).saturating_mul(1024 * 1024);
-    cache.evict();
+    let _ = cache.evict();
 }
 pub fn decoded_cache_stats() -> (usize, usize) {
     let cache = DECODED_POSTERS.lock().unwrap();
@@ -273,6 +323,71 @@ pub fn decoded_cache_insert(key: &str, pixels: Pixels) {
 }
 pub fn decoded_cache_clear() {
     DECODED_POSTERS.lock().unwrap().clear();
+}
+fn decoded_cache_insert_registered(
+    key: &str,
+    pixels: Pixels,
+    evidence: Option<Arc<DiskRegistrationEvidence>>,
+) {
+    let mut cache = DECODED_POSTERS.lock().unwrap();
+    cache.insert(key.to_owned(), pixels);
+    if let Some(entry) = cache.map.get_mut(key) {
+        entry.registration = evidence;
+    }
+}
+// Never hold the decoded mutex across file I/O or GC tracker operations.
+#[cfg(test)]
+fn decoded_registration_snapshot(
+    key: &str,
+) -> Option<(u64, Option<Arc<DiskRegistrationEvidence>>)> {
+    let cache = DECODED_POSTERS.lock().unwrap();
+    let entry = cache.map.get(key)?;
+    Some((entry.publication, entry.registration.clone()))
+}
+fn attach_registration(
+    key: &str,
+    publication: u64,
+    evidence: Option<Arc<DiskRegistrationEvidence>>,
+) {
+    let mut cache = DECODED_POSTERS.lock().unwrap();
+    if let Some(entry) = cache.map.get_mut(key)
+        && entry.publication == publication
+    {
+        entry.registration = evidence;
+    }
+}
+fn invalidate_disk_registration(path: &Path) {
+    let mut cache = DECODED_POSTERS.lock().unwrap();
+    for entry in cache.map.values_mut() {
+        if entry
+            .registration
+            .as_ref()
+            .is_some_and(|proof| proof.path == path)
+        {
+            entry.registration = None;
+        }
+    }
+}
+fn registration_evidence(
+    path: &Path,
+    metadata: &VariantMetadata,
+) -> Option<Arc<DiskRegistrationEvidence>> {
+    // Bind the observation to the actual durable bytes, even if an external
+    // writer replaced the pathname between our atomic rename and observation.
+    let fingerprint = file_fingerprint(path)?;
+    let stored = read_variant(path)?;
+    if stored.metadata != *metadata || file_fingerprint(path).as_ref() != Some(&fingerprint) {
+        return None;
+    }
+    Some(Arc::new(DiskRegistrationEvidence {
+        path: path.to_owned(),
+        clear: CACHE_GENERATION.load(Ordering::Acquire),
+        settings: image_settings_revision(),
+        recipe: metadata.recipe,
+        source_checksum: metadata.checksum,
+        uses: metadata.uses.clone(),
+        fingerprint,
+    }))
 }
 pub fn image_buffers_equal(a: &Pixels, b: &Pixels) -> bool {
     a.width() == b.width() && a.height() == b.height() && a.as_bytes() == b.as_bytes()
@@ -496,7 +611,7 @@ fn fit_source(source: image::DynamicImage, max_side: Option<u32>) -> Option<imag
 }
 
 const MAGIC: &[u8; 8] = b"NVIMAGE2";
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct VariantMetadata {
     version: u32,
     url: String,
@@ -517,24 +632,88 @@ fn recipe_disk_path(dir: &Path, url: &str, recipe: ImageRecipe) -> PathBuf {
         fnv1a(recipe.key().as_bytes())
     ))
 }
+const MAX_VARIANT_METADATA_BYTES: usize = 64 * 1024;
+const VARIANT_HEADER_BYTES: u64 = 12;
+
+fn image_encoded_byte_limit() -> u64 {
+    // Match codec admission and the application's encoded artwork transport cap.
+    nova_image::DecodeLimits::default().max_encoded_bytes as u64
+}
+fn invalid_variant() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "invalid or oversized cache variant",
+    )
+}
+
+/// The file length is only an early rejection hint. Header/metadata reads are
+/// individually bounded; the payload reader remains authoritative if a file
+/// grows after metadata() or its length is unavailable.
+fn read_variant_body(
+    mut reader: impl std::io::Read,
+    length_hint: Option<u64>,
+    max_encoded_bytes: u64,
+) -> std::io::Result<DiskVariant> {
+    use std::io::Read;
+    let envelope_limit = VARIANT_HEADER_BYTES
+        .checked_add(MAX_VARIANT_METADATA_BYTES as u64)
+        .and_then(|limit| limit.checked_add(max_encoded_bytes))
+        .ok_or_else(invalid_variant)?;
+    if length_hint.is_some_and(|length| length > envelope_limit) {
+        return Err(invalid_variant());
+    }
+    let mut header = [0u8; VARIANT_HEADER_BYTES as usize];
+    reader.read_exact(&mut header)?;
+    if &header[..8] != MAGIC {
+        return Err(invalid_variant());
+    }
+    let metadata_length = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
+    if metadata_length > MAX_VARIANT_METADATA_BYTES {
+        return Err(invalid_variant());
+    }
+    let payload_hint = length_hint
+        .and_then(|length| length.checked_sub(VARIANT_HEADER_BYTES + metadata_length as u64));
+    if payload_hint.is_some_and(|length| length > max_encoded_bytes) {
+        return Err(invalid_variant());
+    }
+    let mut metadata_bytes = vec![0; metadata_length];
+    reader.read_exact(&mut metadata_bytes)?;
+    let metadata: VariantMetadata = serde_json::from_slice(&metadata_bytes)?;
+    if metadata.version != 2 || metadata.uses.is_empty() {
+        return Err(invalid_variant());
+    }
+    drop(metadata_bytes);
+    // A validated, capped length hint avoids growth/copying for ordinary files.
+    let capacity = payload_hint
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or(0);
+    let mut encoded = Vec::with_capacity(capacity);
+    reader
+        .take(
+            max_encoded_bytes
+                .checked_add(1)
+                .ok_or_else(invalid_variant)?,
+        )
+        .read_to_end(&mut encoded)?;
+    if encoded.len() as u64 > max_encoded_bytes || metadata.checksum != fnv1a(&encoded) {
+        return Err(invalid_variant());
+    }
+    Ok(DiskVariant { metadata, encoded })
+}
+
 fn read_variant(path: &Path) -> Option<DiskVariant> {
+    read_variant_with_limit(path, image_encoded_byte_limit())
+}
+fn read_variant_with_limit(path: &Path, max_encoded_bytes: u64) -> Option<DiskVariant> {
+    #[cfg(test)]
+    REGISTRATION_WORK.with(|work| {
+        let (stats, reads, decodes) = work.get();
+        work.set((stats, reads + 1, decodes));
+    });
     let result = (|| {
-        let data = fs::read(path).ok()?;
-        if data.get(..8)? != MAGIC {
-            return None;
-        }
-        let length = u32::from_le_bytes(data.get(8..12)?.try_into().ok()?) as usize;
-        if length > 64 * 1024 {
-            return None;
-        }
-        let end = 12usize.checked_add(length)?;
-        let metadata: VariantMetadata = serde_json::from_slice(data.get(12..end)?).ok()?;
-        let encoded = data.get(end..)?.to_vec();
-        if metadata.version != 2 || metadata.uses.is_empty() || metadata.checksum != fnv1a(&encoded)
-        {
-            return None;
-        }
-        Some(DiskVariant { metadata, encoded })
+        let file = fs::File::open(path).ok()?;
+        let length = file.metadata().ok()?.len();
+        read_variant_body(file, Some(length), max_encoded_bytes).ok()
     })();
     if result.is_none() {
         gc::mark_invalid(path);
@@ -545,6 +724,11 @@ fn variant_pixels(variant: &DiskVariant, url: &str, recipe: ImageRecipe) -> Opti
     if variant.metadata.url != url || variant.metadata.recipe != recipe {
         return None;
     }
+    #[cfg(test)]
+    REGISTRATION_WORK.with(|work| {
+        let (stats, reads, decodes) = work.get();
+        work.set((stats, reads, decodes + 1));
+    });
     let pixels = decode_image_bytes(&variant.encoded).ok()?;
     if pixels.width() != variant.metadata.width
         || pixels.height() != variant.metadata.height
@@ -604,18 +788,363 @@ fn write_variant_if(
     variant: &DiskVariant,
     still_current: impl FnOnce() -> bool,
 ) -> std::io::Result<bool> {
+    write_variant_if_with_limit(path, variant, image_encoded_byte_limit(), still_current)
+}
+fn write_variant_if_with_limit(
+    path: &Path,
+    variant: &DiskVariant,
+    max_encoded_bytes: u64,
+    still_current: impl FnOnce() -> bool,
+) -> std::io::Result<bool> {
+    if variant.encoded.len() as u64 > max_encoded_bytes {
+        return Err(invalid_variant());
+    }
     let metadata = serde_json::to_vec(&variant.metadata)?;
-    let mut data = Vec::with_capacity(12 + metadata.len() + variant.encoded.len());
+    if metadata.len() > MAX_VARIANT_METADATA_BYTES {
+        return Err(invalid_variant());
+    }
+    let size = (VARIANT_HEADER_BYTES as usize)
+        .checked_add(metadata.len())
+        .and_then(|size| size.checked_add(variant.encoded.len()))
+        .ok_or_else(invalid_variant)?;
+    let mut data = Vec::with_capacity(size);
     data.extend_from_slice(MAGIC);
     data.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
     data.extend_from_slice(&metadata);
     data.extend_from_slice(&variant.encoded);
     let written = atomic_write_if(path, &data, still_current)?;
     if written {
+        invalidate_disk_registration(path);
         gc::record_variant(path, &variant.metadata, data.len() as u64);
     }
     Ok(written)
 }
+#[cfg(test)]
+thread_local! {
+    static FILENAME_WORK: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+fn filename_directory_entries(dir: &Path) -> std::io::Result<fs::ReadDir> {
+    #[cfg(test)]
+    FILENAME_WORK.with(|work| {
+        let (scans, entries) = work.get();
+        work.set((scans + 1, entries));
+    });
+    fs::read_dir(dir)
+}
+fn filename_entry_visited() {
+    #[cfg(test)]
+    FILENAME_WORK.with(|work| {
+        let (scans, entries) = work.get();
+        work.set((scans, entries + 1));
+    });
+}
+
+// Filename membership is independent of the optional GC worker. Only paths are
+// retained; payloads and decoded pixels never enter this index.
+#[derive(Default)]
+struct FilenameState {
+    initialized: bool,
+    revision: u64,
+    epoch: u64,
+    scans: usize,
+    buckets: HashMap<String, HashMap<String, u64>>,
+    deleted: HashMap<String, u64>,
+}
+#[derive(Default)]
+struct FilenameIndex {
+    state: Mutex<FilenameState>,
+    initialization: Mutex<()>,
+}
+type FilenameIndexes = Vec<(PathBuf, Arc<FilenameIndex>)>;
+
+static FILENAME_INDEXES: LazyLock<Mutex<FilenameIndexes>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+const RETAINED_FILENAME_DIRECTORIES: usize = 32;
+fn filename_index(dir: &Path) -> Arc<FilenameIndex> {
+    let mut indexes = FILENAME_INDEXES.lock().unwrap();
+    if let Some(position) = indexes.iter().position(|(path, _)| path == dir) {
+        let entry = indexes.remove(position);
+        let index = entry.1.clone();
+        indexes.push(entry);
+        return index;
+    }
+    // Active scans/lookups retain their namespace; trim only idle namespaces.
+    while indexes.len() >= RETAINED_FILENAME_DIRECTORIES
+        && let Some(position) = indexes
+            .iter()
+            .position(|(_, index)| Arc::strong_count(index) == 1)
+    {
+        indexes.remove(position);
+    }
+    let index = Arc::new(FilenameIndex::default());
+    indexes.push((dir.to_owned(), index.clone()));
+    index
+}
+fn indexed_prefix(name: &str) -> Option<&str> {
+    let prefix = name.get(..16)?;
+    if !prefix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let suffix = name.get(16..)?;
+    (name.ends_with(".variant") || matches!(suffix, ".img" | ".cfg") || suffix.starts_with(".d"))
+        .then_some(prefix)
+}
+fn variant_index_record(path: &Path) {
+    let Some((dir, name)) = path
+        .parent()
+        .zip(path.file_name().and_then(|name| name.to_str()))
+    else {
+        return;
+    };
+    let Some(prefix) = indexed_prefix(name) else {
+        return;
+    };
+    let index = filename_index(dir);
+    let mut state = index.state.lock().unwrap();
+    state.revision = state.revision.wrapping_add(1);
+    let revision = state.revision;
+    state
+        .buckets
+        .entry(prefix.to_owned())
+        .or_default()
+        .insert(name.to_owned(), revision);
+    state.deleted.remove(name);
+}
+fn variant_index_removed(path: &Path) {
+    invalidate_disk_registration(path);
+    let Some((dir, name)) = path
+        .parent()
+        .zip(path.file_name().and_then(|name| name.to_str()))
+    else {
+        return;
+    };
+    let Some(prefix) = indexed_prefix(name) else {
+        return;
+    };
+    let index = filename_index(dir);
+    let mut state = index.state.lock().unwrap();
+    state.revision = state.revision.wrapping_add(1);
+    let revision = state.revision;
+    if let Some(bucket) = state.buckets.get_mut(prefix) {
+        bucket.remove(name);
+        if bucket.is_empty() {
+            state.buckets.remove(prefix);
+        }
+    }
+    if state.scans > 0 {
+        state.deleted.insert(name.to_owned(), revision);
+    }
+}
+fn variant_index_cleared(dir: &Path) {
+    let index = filename_index(dir);
+    let mut state = index.state.lock().unwrap();
+    state.epoch = state.epoch.wrapping_add(1);
+    state.revision = state.revision.wrapping_add(1);
+    state.initialized = false;
+    state.buckets.clear();
+    state.deleted.clear();
+}
+struct FilenameScan {
+    index: Arc<FilenameIndex>,
+    revision: u64,
+    epoch: u64,
+}
+impl FilenameScan {
+    fn begin(index: Arc<FilenameIndex>) -> Self {
+        let mut state = index.state.lock().unwrap();
+        state.scans += 1;
+        let (revision, epoch) = (state.revision, state.epoch);
+        drop(state);
+        Self {
+            index,
+            revision,
+            epoch,
+        }
+    }
+    fn publish(&self, names: Vec<String>) -> bool {
+        let mut state = self.index.state.lock().unwrap();
+        if state.epoch != self.epoch {
+            return false;
+        }
+        let mut buckets: HashMap<String, HashMap<String, u64>> = HashMap::new();
+        for name in names {
+            if let Some(prefix) = indexed_prefix(&name) {
+                buckets
+                    .entry(prefix.to_owned())
+                    .or_default()
+                    .insert(name, self.revision);
+            }
+        }
+        for (prefix, current) in &state.buckets {
+            for (name, revision) in current {
+                if *revision > self.revision {
+                    buckets
+                        .entry(prefix.clone())
+                        .or_default()
+                        .insert(name.clone(), *revision);
+                }
+            }
+        }
+        for (name, revision) in &state.deleted {
+            if *revision > self.revision
+                && let Some(prefix) = indexed_prefix(name)
+                && let Some(bucket) = buckets.get_mut(prefix)
+            {
+                bucket.remove(name);
+            }
+        }
+        buckets.retain(|_, bucket| !bucket.is_empty());
+        state.buckets = buckets;
+        state.initialized = true;
+        true
+    }
+}
+impl Drop for FilenameScan {
+    fn drop(&mut self) {
+        let mut state = self.index.state.lock().unwrap();
+        state.scans -= 1;
+        if state.scans == 0 {
+            state.deleted.clear();
+        }
+    }
+}
+fn indexed_url_paths(dir: &Path, url: &str) -> Vec<PathBuf> {
+    let index = filename_index(dir);
+    if !index.state.lock().unwrap().initialized {
+        let _initialization = index.initialization.lock().unwrap();
+        if !index.state.lock().unwrap().initialized {
+            let scan = FilenameScan::begin(index.clone());
+            let entries = match filename_directory_entries(dir) {
+                Ok(entries) => Some(entries),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(_) => return Vec::new(),
+            };
+            let mut names = Vec::new();
+            for entry in entries.into_iter().flatten() {
+                filename_entry_visited();
+                let Ok(entry) = entry else {
+                    return Vec::new();
+                };
+                if let Ok(name) = entry.file_name().into_string() {
+                    names.push(name);
+                }
+            }
+            if !scan.publish(names) {
+                return Vec::new();
+            }
+        }
+    }
+    let prefix = format!("{:016x}", fnv1a(url.as_bytes()));
+    let state = index.state.lock().unwrap();
+    state
+        .buckets
+        .get(&prefix)
+        .into_iter()
+        .flat_map(|bucket| bucket.keys())
+        .map(|name| dir.join(name))
+        .collect()
+}
+fn indexed_variant_paths(dir: &Path, url: &str) -> impl Iterator<Item = PathBuf> {
+    indexed_url_paths(dir, url).into_iter().filter(|path| {
+        path.extension()
+            .is_some_and(|extension| extension == "variant")
+    })
+}
+fn read_indexed_variant(path: &Path) -> Option<DiskVariant> {
+    let variant = read_variant(path);
+    if variant.is_none()
+        && matches!(fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        variant_index_removed(path);
+    }
+    variant
+}
+
+struct VariantInventory {
+    urls: HashSet<String>,
+    index: Arc<FilenameIndex>,
+}
+enum InventoryFailure {
+    Cancelled,
+    Io,
+}
+impl VariantInventory {
+    fn scan(
+        dir: &Path,
+        cancel: &AtomicBool,
+        generation: u64,
+        mut checkpoint: impl FnMut(usize),
+    ) -> Result<Self, InventoryFailure> {
+        if cancel.load(Ordering::Acquire) {
+            return Err(InventoryFailure::Cancelled);
+        }
+        let scan = FilenameScan::begin(filename_index(dir));
+        let entries = match filename_directory_entries(dir) {
+            Ok(entries) => Some(entries),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return Err(InventoryFailure::Io),
+        };
+        let mut names = Vec::new();
+        let mut urls = HashSet::new();
+        for (position, entry) in entries.into_iter().flatten().enumerate() {
+            filename_entry_visited();
+            if position % 64 == 0 {
+                checkpoint(urls.len());
+                if cancel.load(Ordering::Acquire) {
+                    return Err(InventoryFailure::Cancelled);
+                }
+            }
+            let entry = entry.map_err(|_| InventoryFailure::Io)?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if indexed_prefix(name).is_some() {
+                names.push(name.to_owned());
+            }
+            if !entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "variant")
+            {
+                continue;
+            }
+            // Cancellation is also checked immediately before and after locks.
+            if cancel.load(Ordering::Acquire) {
+                return Err(InventoryFailure::Cancelled);
+            }
+            let _mutation = CACHE_MUTATION.read().unwrap();
+            if CACHE_GENERATION.load(Ordering::Acquire) != generation {
+                return Err(InventoryFailure::Cancelled);
+            }
+            let prefix = name.get(..16).unwrap_or(name);
+            let lock = entry_lock(&dir.join(format!("{prefix}.lock")));
+            if cancel.load(Ordering::Acquire) {
+                return Err(InventoryFailure::Cancelled);
+            }
+            let _guard = lock.lock().unwrap();
+            if cancel.load(Ordering::Acquire) {
+                return Err(InventoryFailure::Cancelled);
+            }
+            if let Some(variant) = read_variant(&entry.path()) {
+                urls.insert(variant.metadata.url);
+            }
+        }
+        checkpoint(urls.len());
+        if cancel.load(Ordering::Acquire)
+            || CACHE_GENERATION.load(Ordering::Acquire) != generation
+            || !scan.publish(names)
+        {
+            return Err(InventoryFailure::Cancelled);
+        }
+        Ok(Self {
+            urls,
+            index: scan.index.clone(),
+        })
+    }
+}
+
+#[cfg(test)]
 fn variant_paths(dir: &Path) -> impl Iterator<Item = PathBuf> {
     fs::read_dir(dir)
         .ok()
@@ -625,6 +1154,7 @@ fn variant_paths(dir: &Path) -> impl Iterator<Item = PathBuf> {
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e == "variant"))
 }
+#[cfg(test)]
 fn directory_variants(dir: &Path) -> impl Iterator<Item = (PathBuf, DiskVariant)> {
     // Stream files rather than retaining the entire compressed disk cache while
     // collecting metadata for maintenance.
@@ -636,12 +1166,14 @@ fn retire_use_history(dir: &Path, url: &str, uses: &[ImageUse], keep: &Path) {
     let prefix = format!("{:016x}", fnv1a(url.as_bytes()));
     // Most loads replace one URL's variants. Do not read every other URL's
     // payload just to retire that URL's older processing settings.
-    let history = variant_paths(dir)
+    let paths = indexed_url_paths(dir, url);
+    let history = paths
+        .iter()
         .filter(|path| {
-            path.file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+            path.extension()
+                .is_some_and(|extension| extension == "variant")
         })
-        .filter_map(|path| read_variant(&path).map(|variant| (path, variant)));
+        .filter_map(|path| read_indexed_variant(path).map(|variant| (path, variant)));
     for (path, mut variant) in history {
         if path == keep || variant.metadata.url != url {
             continue;
@@ -655,23 +1187,23 @@ fn retire_use_history(dir: &Path, url: &str, uses: &[ImageUse], keep: &Path) {
             continue;
         }
         if variant.metadata.uses.is_empty() {
-            if fs::remove_file(&path).is_ok() {
-                gc::removed(&path);
+            if fs::remove_file(path).is_ok() {
+                gc::removed(path);
             }
         } else {
-            let _ = write_variant(&path, &variant);
+            let _ = write_variant(path, &variant);
         }
     }
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name == format!("{prefix}.img")
-                || name == format!("{prefix}.cfg")
-                || name.starts_with(&format!("{prefix}.d"))
-            {
-                let _ = fs::remove_file(entry.path());
-            }
+    for path in paths {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if (name == format!("{prefix}.img")
+            || name == format!("{prefix}.cfg")
+            || name.starts_with(&format!("{prefix}.d")))
+            && fs::remove_file(&path).is_ok()
+        {
+            gc::removed(&path);
         }
     }
 }
@@ -732,7 +1264,7 @@ fn persist_processed(
     uses: &[ImageUse],
     recipe: ImageRecipe,
     processed: &Processed,
-) -> std::io::Result<()> {
+) -> std::io::Result<VariantMetadata> {
     let encoded = processed
         .encoded
         .as_ref()
@@ -763,28 +1295,85 @@ fn persist_processed(
     write_variant(&path, &variant)?;
     invalidate_registration_snapshots(dir, url, uses);
     retire_use_history(dir, url, uses, &path);
-    Ok(())
+    Ok(variant.metadata)
 }
-fn register_cached_use_locked(
+// Caller holds the URL publication lock and mutation read guard. A metadata
+// observation detects ordinary unlink/replace/rewrite, including symlink target
+// changes. It cannot detect adversarial identical fingerprints or a mutation
+// after that observation.
+fn register_cached_pixels_locked(
     dir: &Path,
     url: &str,
     image_use: ImageUse,
     recipe: ImageRecipe,
+    pixels: &Pixels,
 ) -> bool {
+    let key = image_recipe_cache_key(url, recipe);
     let path = recipe_disk_path(dir, url, recipe);
+    let snapshot = {
+        let cache = DECODED_POSTERS.lock().unwrap();
+        cache
+            .map
+            .get(&key)
+            .filter(|entry| {
+                entry.pixels.as_bytes().as_ptr() == pixels.as_bytes().as_ptr()
+                    && entry.pixels.width() == pixels.width()
+                    && entry.pixels.height() == pixels.height()
+            })
+            .map(|entry| (entry.publication, entry.registration.clone()))
+    };
+    let matches_entry = snapshot.is_some();
+    let fingerprint = file_fingerprint(&path);
+    let proven = snapshot
+        .as_ref()
+        .and_then(|(_, proof)| proof.as_ref())
+        .filter(|proof| {
+            proof.path == path
+                && proof.recipe == recipe
+                && proof.clear == CACHE_GENERATION.load(Ordering::Acquire)
+                && proof.settings == image_settings_revision()
+                && fingerprint.as_ref() == Some(&proof.fingerprint)
+        });
+    if proven.is_some_and(|proof| proof.uses.contains(&image_use)) {
+        gc::touch_decoded(&key);
+        return true;
+    }
+    let proven_checksum = proven.map(|proof| proof.source_checksum);
+    if let Some((publication, _)) = snapshot.as_ref() {
+        attach_registration(&key, *publication, None);
+    }
     let Some(mut variant) =
         read_variant(&path).filter(|v| v.metadata.url == url && v.metadata.recipe == recipe)
     else {
         return false;
     };
+    // Unknown provenance or changed evidence must validate the stored pixels;
+    // URL/recipe equality cannot bind a failed replacement to the old file.
+    if proven_checksum != Some(variant.metadata.checksum)
+        && !variant_pixels(&variant, url, recipe)
+            .is_some_and(|stored| image_buffers_equal(&stored, pixels))
+    {
+        return false;
+    }
+    if fingerprint != file_fingerprint(&path) {
+        return false;
+    }
     if !variant.metadata.uses.contains(&image_use) {
         variant.metadata.uses.push(image_use);
-        if write_variant(&path, &variant).is_ok() {
-            invalidate_registration_snapshots(dir, url, &[image_use]);
-            retire_use_history(dir, url, &[image_use], &path);
+        if write_variant(&path, &variant).is_err() {
+            return false;
         }
+        invalidate_registration_snapshots(dir, url, &[image_use]);
+        retire_use_history(dir, url, &[image_use], &path);
     }
     gc::record_existing(&path, &variant.metadata);
+    if matches_entry && let Some((publication, _)) = snapshot {
+        attach_registration(
+            &key,
+            publication,
+            registration_evidence(&path, &variant.metadata),
+        );
+    }
     true
 }
 
@@ -810,26 +1399,7 @@ fn register_refreshed_use_locked(
     recipe: ImageRecipe,
     pixels: &Pixels,
 ) {
-    let path = recipe_disk_path(dir, url, recipe);
-    let Some(mut variant) =
-        read_variant(&path).filter(|v| v.metadata.url == url && v.metadata.recipe == recipe)
-    else {
-        return;
-    };
-    // A failed atomic replacement leaves the previous valid variant in place.
-    // Do not attach a new caller role to that older generation.
-    if !variant_pixels(&variant, url, recipe)
-        .is_some_and(|stored| image_buffers_equal(&stored, pixels))
-    {
-        return;
-    }
-    if !variant.metadata.uses.contains(&image_use) {
-        variant.metadata.uses.push(image_use);
-        if write_variant(&path, &variant).is_ok() {
-            invalidate_registration_snapshots(dir, url, &[image_use]);
-            retire_use_history(dir, url, &[image_use], &path);
-        }
-    }
+    let _ = register_cached_pixels_locked(dir, url, image_use, recipe, pixels);
 }
 
 #[derive(Clone, Copy)]
@@ -983,12 +1553,15 @@ fn publish_processed_locked(
     let processed = processed?;
     let recipe = ticket.recipe;
     if processed.encoded.is_some() {
-        if disk {
-            let _ = persist_processed(dir, url, uses, recipe, &processed);
-        }
-        decoded_cache_insert(
+        let durable = disk
+            .then(|| persist_processed(dir, url, uses, recipe, &processed).ok())
+            .flatten();
+        decoded_cache_insert_registered(
             &image_recipe_cache_key(url, recipe),
             processed.pixels.clone(),
+            durable.as_ref().and_then(|metadata| {
+                registration_evidence(&recipe_disk_path(dir, url, recipe), metadata)
+            }),
         );
         ticket.published(&processed.pixels);
     }
@@ -1149,7 +1722,7 @@ fn cached_recipe_locked(
 ) -> Option<Pixels> {
     let key = image_recipe_cache_key(url, recipe);
     if let Some(pixels) = decoded_cache_get(&key)
-        && (!disk || register_cached_use_locked(dir, url, image_use, recipe))
+        && (!disk || register_cached_pixels_locked(dir, url, image_use, recipe, &pixels))
     {
         return Some(pixels);
     }
@@ -1160,15 +1733,24 @@ fn cached_recipe_locked(
         if let Some(mut variant) = read_variant(&path)
             && let Some(pixels) = variant_pixels(&variant, url, recipe)
         {
+            let mut durable = true;
             if !variant.metadata.uses.contains(&image_use) {
                 variant.metadata.uses.push(image_use);
                 if write_variant(&path, &variant).is_ok() {
                     invalidate_registration_snapshots(dir, url, &[image_use]);
                     retire_use_history(dir, url, &[image_use], &path);
+                } else {
+                    durable = false;
                 }
             }
             gc::record_existing(&path, &variant.metadata);
-            decoded_cache_insert(&key, pixels.clone());
+            decoded_cache_insert_registered(
+                &key,
+                pixels.clone(),
+                durable
+                    .then(|| registration_evidence(&path, &variant.metadata))
+                    .flatten(),
+            );
             return Some(pixels);
         }
     }
@@ -1411,14 +1993,9 @@ struct UseRegistration {
 }
 type UseRegistrations = HashMap<ImageUse, Vec<UseRegistration>>;
 fn use_registrations(dir: &Path, url: &str) -> UseRegistrations {
-    let prefix = format!("{:016x}", fnv1a(url.as_bytes()));
     let mut registrations = HashMap::<ImageUse, Vec<UseRegistration>>::new();
-    for variant in variant_paths(dir)
-        .filter(|path| {
-            path.file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
-        })
-        .filter_map(|path| read_variant(&path))
+    for variant in indexed_variant_paths(dir, url)
+        .filter_map(|path| read_indexed_variant(&path))
         .filter(|variant| variant.metadata.url == url)
     {
         for image_use in variant.metadata.uses {
@@ -1455,15 +2032,42 @@ fn rewrite_entries_with(
 ) -> RewriteProgress {
     let mut result = RewriteProgress::default();
     let generation = CACHE_GENERATION.load(Ordering::Acquire);
-    let urls: HashSet<String> = directory_variants(dir)
-        .map(|(_, variant)| variant.metadata.url)
-        .collect();
+    let inventory = VariantInventory::scan(dir, cancel, generation, |discovered| {
+        // Preserve the first successful progress callback's snapshot/ticket
+        // boundary. Cancellation still returns the discovered partial total.
+        result.total = discovered;
+    });
+    let (urls, _filename_index) = match inventory {
+        Ok(inventory) => (inventory.urls, inventory.index),
+        Err(failure) => {
+            match failure {
+                InventoryFailure::Cancelled => result.cancelled = true,
+                InventoryFailure::Io => result.failed += 1,
+            }
+            progress(result);
+            return result;
+        }
+    };
     let mut snapshots = HashMap::new();
     {
         let _mutation = CACHE_MUTATION.read().unwrap();
         for url in urls {
+            if cancel.load(Ordering::Acquire)
+                || CACHE_GENERATION.load(Ordering::Acquire) != generation
+            {
+                result.cancelled = true;
+                break;
+            }
             let lock = url_lock(dir, &url);
+            if cancel.load(Ordering::Acquire) {
+                result.cancelled = true;
+                break;
+            }
             let _guard = lock.lock().unwrap();
+            if cancel.load(Ordering::Acquire) {
+                result.cancelled = true;
+                break;
+            }
             let registrations = use_registrations(dir, &url);
             let watches: HashMap<_, _> = registrations
                 .keys()
@@ -1493,6 +2097,10 @@ fn rewrite_entries_with(
                 .collect();
             snapshots.insert(url, (registrations, watches, recipes));
         }
+    }
+    if result.cancelled {
+        progress(result);
+        return result;
     }
     result.total = snapshots.len();
     progress(result);
@@ -1556,8 +2164,20 @@ fn rewrite_entries_with(
                 result.cancelled = true;
                 break;
             }
+            if cancel.load(Ordering::Acquire) {
+                result.cancelled = true;
+                break;
+            }
             let lock = url_lock(dir, &url);
+            if cancel.load(Ordering::Acquire) {
+                result.cancelled = true;
+                break;
+            }
             let _guard = lock.lock().unwrap();
+            if cancel.load(Ordering::Acquire) {
+                result.cancelled = true;
+                break;
+            }
             let current = use_registrations(dir, &url);
             let uses: Vec<_> = uses
                 .into_iter()
