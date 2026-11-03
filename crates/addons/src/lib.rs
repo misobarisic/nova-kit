@@ -45,6 +45,10 @@ pub enum Error {
         url: String,
         source: serde_json::Error,
     },
+    /// Permanent response-size failure, measured in decoded transport bytes.
+    TooLarge { limit: usize },
+    /// Reading a successful response failed.
+    BodyRead(std::io::Error),
     /// Transport-level failure (DNS, connect, timeout, TLS, …). Only present
     /// with the `client` feature (platforms without it report errors as messages).
     #[cfg(feature = "client")]
@@ -54,6 +58,8 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Error::TooLarge { limit } => write!(f, "response exceeded {limit} byte limit"),
+            Error::BodyRead(e) => write!(f, "read body failed: {e}"),
             Error::InvalidUrl(u) => write!(f, "invalid addon URL: {u}"),
             Error::Status {
                 status,
@@ -82,6 +88,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::Json { source, .. } => Some(source),
+            Error::BodyRead(source) => Some(source),
             #[cfg(feature = "client")]
             Error::Http(e) => Some(e),
             _ => None,
@@ -94,6 +101,37 @@ impl From<reqwest::Error> for Error {
     fn from(e: reqwest::Error) -> Self {
         Error::Http(e)
     }
+}
+
+/// Default JSON allowance for addon and generic HTTP responses (8 MiB).
+pub const DEFAULT_JSON_BODY_LIMIT: usize = 8 * 1024 * 1024;
+/// Hard ceiling for configurable JSON and encoded artwork responses (32 MiB).
+/// This does not replace image decoder dimension/pixel limits.
+pub const MAX_BODY_LIMIT: usize = 32 * 1024 * 1024;
+
+/// Read at most `limit + 1` decoded bytes, without a second full-body copy.
+/// Length hints can reject early, but never authorize an unbounded allocation.
+/// HTTP clients must pass their decoded content length (not a compressed header).
+/// Requested limits above the documented hard ceiling are clamped.
+pub fn read_bounded_body(
+    reader: impl std::io::Read,
+    length_hint: Option<u64>,
+    limit: usize,
+) -> Result<Vec<u8>, Error> {
+    use std::io::Read;
+    let limit = limit.min(MAX_BODY_LIMIT);
+    if length_hint.is_some_and(|length| length > limit as u64) {
+        return Err(Error::TooLarge { limit });
+    }
+    let mut body = Vec::new();
+    reader
+        .take(limit as u64 + 1)
+        .read_to_end(&mut body)
+        .map_err(Error::BodyRead)?;
+    if body.len() > limit {
+        return Err(Error::TooLarge { limit });
+    }
+    Ok(body)
 }
 
 /// One Stremio addon, reachable at a base URL such as `https://v3-cinemeta.strem.io`.
@@ -358,8 +396,16 @@ fn shared_client() -> reqwest::blocking::Client {
 /// Blocking GET returning the raw body, with the same transparent retry
 /// policy as the addon methods (transient 502/503/504 + timeouts/connect
 /// errors, short backoff). Shared by the desktop app's fetch layer.
+/// The decoded body is bounded to [`DEFAULT_JSON_BODY_LIMIT`] (8 MiB).
 #[cfg(feature = "client")]
 pub fn http_get_blocking(url: &str) -> Result<Vec<u8>, Error> {
+    http_get_blocking_with_limit(url, DEFAULT_JSON_BODY_LIMIT)
+}
+
+/// Explicit decoded-byte allowance, capped at [`MAX_BODY_LIMIT`]. Size errors
+/// are permanent and never retried; the legacy helper uses the 8 MiB default.
+#[cfg(feature = "client")]
+pub fn http_get_blocking_with_limit(url: &str, limit: usize) -> Result<Vec<u8>, Error> {
     let mut retries = 0usize;
     loop {
         let result = (|| {
@@ -372,7 +418,8 @@ pub fn http_get_blocking(url: &str) -> Result<Vec<u8>, Error> {
                     retries: 0,
                 });
             }
-            Ok(response.bytes()?.to_vec())
+            let length = response.content_length();
+            read_bounded_body(response, length, limit)
         })();
 
         match result {
@@ -381,6 +428,10 @@ pub fn http_get_blocking(url: &str) -> Result<Vec<u8>, Error> {
                 let transient = match &e {
                     Error::Status { status, .. } => TRANSIENT_STATUSES.contains(status),
                     Error::Http(he) => he.is_timeout() || he.is_connect(),
+                    Error::BodyRead(error) => error
+                        .get_ref()
+                        .and_then(|source| source.downcast_ref::<reqwest::Error>())
+                        .is_some_and(|error| error.is_timeout() || error.is_connect()),
                     _ => false,
                 };
                 if transient && retries < MAX_RETRIES {
@@ -726,6 +777,87 @@ mod tests {
     }
 
     #[test]
+    fn oversized_http_body_is_permanent_and_legacy_helper_is_bounded() {
+        let body: &'static str = "x".repeat(DEFAULT_JSON_BODY_LIMIT + 1).leak();
+        let (base, hits) = serve_answering(move |_| (200, body));
+        assert!(matches!(
+            http_get_blocking(&base),
+            Err(Error::TooLarge {
+                limit: DEFAULT_JSON_BODY_LIMIT
+            })
+        ));
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn bounded_http_handles_close_delimited_chunked_and_normal_bodies() {
+        for size in [65535, 65536, 65537, 1024 * 1024] {
+            for chunked in [false, true] {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
+                let server = std::thread::spawn(move || {
+                    let (mut socket, _) = listener.accept().unwrap();
+                    let mut request = [0; 2048];
+                    socket.read(&mut request).unwrap();
+                    let head = if chunked {
+                        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                    } else {
+                        "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"
+                    };
+                    let _ = socket.write_all(head.as_bytes());
+                    let body = vec![b'x'; size];
+                    if chunked {
+                        let _ = write!(socket, "{size:x}\r\n");
+                    }
+                    let _ = socket.write_all(&body);
+                    if chunked {
+                        let _ = socket.write_all(b"\r\n0\r\n\r\n");
+                    }
+                });
+                let limit = if size == 1024 * 1024 { size } else { 65536 };
+                let result = http_get_blocking_with_limit(&format!("http://{addr}"), limit);
+                if size <= limit {
+                    assert_eq!(result.unwrap(), vec![b'x'; size]);
+                } else {
+                    assert!(matches!(result, Err(Error::TooLarge { .. })));
+                }
+                server.join().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn endless_chunked_http_stops_and_does_not_retry() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 2048];
+            socket.read(&mut request).unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            let chunk = vec![b'x'; 1024];
+            // No terminating chunk: production must stop without waiting for EOF.
+            while socket.write_all(b"400\r\n").is_ok()
+                && socket.write_all(&chunk).is_ok()
+                && socket.write_all(b"\r\n").is_ok()
+            {}
+            listener.set_nonblocking(true).unwrap();
+            assert!(
+                matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+            );
+        });
+        assert!(matches!(
+            http_get_blocking_with_limit(&format!("http://{addr}"), 65536),
+            Err(Error::TooLarge { limit: 65536 })
+        ));
+        server.join().unwrap();
+    }
+
+    #[test]
     fn gateway_504_is_retried_until_success() {
         // A cold Cinemeta-style lookup: the first two attempts trip the
         // gateway timeout, the retry hits the now-warm backend cache.
@@ -846,5 +978,87 @@ mod subtitle_tests {
         .unwrap();
         assert_eq!(rows[0].lang.as_deref(), Some("eng"));
         assert!(Addon::parse_subtitles(br#"{"subtitles":"invalid"}"#).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bounded_body_tests {
+    use super::*;
+    use std::io::{self, Read};
+
+    struct Counted<R> {
+        inner: R,
+        consumed: usize,
+    }
+    impl<R: Read> Read for Counted<R> {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            let n = self.inner.read(out)?;
+            self.consumed += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn boundaries_and_dishonest_hints_count_actual_bytes() {
+        for limit in [0usize, 1, 64 * 1024, 1024 * 1024] {
+            for size in [limit.saturating_sub(1), limit, limit + 1] {
+                for hint in [None, Some(0), Some(size as u64)] {
+                    let mut reader = Counted {
+                        inner: io::repeat(7).take(size as u64),
+                        consumed: 0,
+                    };
+                    let result = read_bounded_body(&mut reader, hint, limit);
+                    assert!(reader.consumed <= limit + 1);
+                    if size <= limit {
+                        assert_eq!(result.unwrap(), vec![7; size]);
+                    } else {
+                        assert!(
+                            matches!(result, Err(Error::TooLarge { limit: actual }) if actual == limit)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn endless_body_stops_after_one_sentinel_byte() {
+        let mut reader = Counted {
+            inner: io::repeat(0),
+            consumed: 0,
+        };
+        assert!(matches!(
+            read_bounded_body(&mut reader, None, 65536),
+            Err(Error::TooLarge { limit: 65536 })
+        ));
+        assert_eq!(reader.consumed, 65537);
+    }
+
+    #[test]
+    fn excessive_hint_rejects_without_read_and_limit_has_hard_ceiling() {
+        let mut reader = Counted {
+            inner: io::repeat(0),
+            consumed: 0,
+        };
+        assert!(matches!(
+            read_bounded_body(&mut reader, Some(MAX_BODY_LIMIT as u64 + 1), usize::MAX),
+            Err(Error::TooLarge {
+                limit: MAX_BODY_LIMIT
+            })
+        ));
+        assert_eq!(reader.consumed, 0);
+    }
+
+    #[test]
+    fn read_failure_preserves_typed_source() {
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::UnexpectedEof, "fixture"))
+            }
+        }
+        let error = read_bounded_body(Broken, None, 16).unwrap_err();
+        assert!(matches!(error, Error::BodyRead(_)));
+        assert!(std::error::Error::source(&error).is_some());
     }
 }
