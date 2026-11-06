@@ -363,6 +363,15 @@ impl Handler {
         }
     }
 
+    /// Record a failed *incoming* exchange. Unlike [`Self::finish_sync`] this
+    /// leaves `syncing` alone: the flag belongs to the outbound pass, which may
+    /// still be running while a peer dials us.
+    pub fn record_incoming_error(&self, error: String) {
+        if let Ok(mut s) = self.status.lock() {
+            s.last_error = Some(error);
+        }
+    }
+
     /// Record that the worker finished a wake-up. Bumped even for a pass with
     /// no eligible peer, so a caller can wait for one attempt to complete
     /// without racing the `syncing` flag.
@@ -438,11 +447,11 @@ impl ProtocolHandler for Handler {
                     }
                     Ok(Err(e)) => {
                         tracing::warn!(error = %format_args!("{e:#}"), "incoming sync failed");
-                        handler.finish_sync(Some(e.to_string()));
+                        handler.record_incoming_error(e.to_string());
                     }
                     Err(_) => {
                         tracing::warn!("incoming sync timed out");
-                        handler.finish_sync(Some("incoming sync timed out".to_string()));
+                        handler.record_incoming_error("incoming sync timed out".to_string());
                     }
                 }
             });
@@ -838,6 +847,8 @@ async fn exchange(
         if let Ok(mut status) = handler.status.lock() {
             status.success_count = status.success_count.saturating_add(1);
             status.last_sync_secs = crate::now_secs();
+            // A completed exchange supersedes an earlier failure, whichever side dialed.
+            status.last_error = None;
         }
     }
 
@@ -1056,6 +1067,40 @@ mod tests {
 
     fn acks_of(handler: &Arc<Handler>) -> crate::PeerAcks {
         handler.acks.lock().map(|a| a.clone()).unwrap_or_default()
+    }
+
+    #[test]
+    fn incoming_error_keeps_outbound_syncing_flag() {
+        let handler = handler(
+            Arc::new(Mutex::new(Store::default())),
+            1,
+            "self",
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        handler.set_syncing(true);
+        handler.record_incoming_error("incoming sync timed out".into());
+        let status = handler.status.lock().unwrap();
+        assert!(status.syncing, "an outbound pass is still running");
+        assert!(status.syncing_since > 0);
+        assert_eq!(
+            status.last_error.as_deref(),
+            Some("incoming sync timed out")
+        );
+    }
+
+    #[test]
+    fn finish_sync_still_clears_syncing() {
+        let handler = handler(
+            Arc::new(Mutex::new(Store::default())),
+            1,
+            "self",
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        handler.set_syncing(true);
+        handler.finish_sync(Some("boom".into()));
+        let status = handler.status.lock().unwrap();
+        assert!(!status.syncing);
+        assert_eq!(status.last_error.as_deref(), Some("boom"));
     }
 
     #[tokio::test]
@@ -2018,6 +2063,28 @@ mod tests {
             acks_of(&a_handler).contains_key(&bid),
             "A did not ack B after the exchange"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn successful_incoming_exchange_clears_stale_error() {
+        let a = endpoint().await;
+        let b = endpoint().await;
+        let aid = a.id().to_string();
+        let bid = b.id().to_string();
+        let a_store = store_with_peer(&bid, "a", "1", 1);
+        let b_store = store_with_peer(&aid, "b", "2", 2);
+        let a_handler = handler(a_store.clone(), 1, &aid, allowlist(&a_store));
+        let b_handler = handler(b_store.clone(), 2, &bid, allowlist(&b_store));
+        b_handler.finish_sync(Some("earlier failure".into()));
+        let _router = iroh::protocol::Router::builder(b.clone())
+            .accept(ALPN, b_handler.clone())
+            .spawn();
+        let conn = a.connect(b.addr(), ALPN).await.unwrap();
+        run(conn, true, &a_handler).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let status = b_handler.status.lock().unwrap();
+        assert_eq!(status.last_error, None);
+        assert!(status.last_sync_secs > 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
