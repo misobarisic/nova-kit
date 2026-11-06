@@ -244,6 +244,12 @@ export component AddonRowCard inherits Rectangle {
     in property <bool> kb_focused_row;
     in property <bool> kb_active;
     in property <int> kb_col: -1;
+    // Removal is destructive and syncs to every device, so it takes two presses.
+    // The owner holds the armed state (keyboard activation lives outside this card)
+    // and is told to disarm on timeout.
+    in property <bool> remove_armed;
+    callback arm_remove();
+    callback disarm_remove();
     callback toggled(bool);
     callback configure();
     callback copy_link();
@@ -256,6 +262,11 @@ export component AddonRowCard inherits Rectangle {
     border-radius: 16px;
     border-width: 1px;
     border-color: Theme.current.border_card;
+    Timer {
+        interval: 5s;
+        running: root.remove_armed;
+        triggered => { root.disarm_remove(); }
+    }
     VerticalLayout {
         padding: 12px;
         spacing: 10px;
@@ -344,10 +355,15 @@ export component AddonRowCard inherits Rectangle {
                 copy_focus := FocusScope { key-pressed(e) => { if e.text == Key.Return || e.text == " " {root.copy_link();accept} else {reject} } }
                 copy_touch := ControlTouchArea { mouse-cursor:pointer; clicked => {copy_focus.focus();root.copy_link();} }
             }
-            AddonIconButton {
+            if !root.remove_armed: AddonIconButton {
                 name:@tr("Remove"); destructive:true; focused: root.kb_active && root.kb_focused_row && root.kb_col == 4;
-                clicked => {root.remove();}
+                clicked => {root.arm_remove();}
                 IcDelete {x:11px;y:11px;width:22px;height:22px;fill:Theme.current.text_destructive;}
+            }
+            if root.remove_armed: PillButton {
+                label: @tr("Confirm remove"); destructive: true; roomy: true; horizontal-stretch: 0;
+                focused: root.kb_active && root.kb_focused_row && root.kb_col == 4;
+                clicked => { root.remove(); }
             }
         }
     }

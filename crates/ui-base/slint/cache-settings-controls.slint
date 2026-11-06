@@ -76,7 +76,7 @@ export component CacheResolutionControl inherits Dropdown {
     roomy: true; enabled: !root.busy;
 }
 export component CacheMemoryControl inherits NumericSetting {
-    minimum: 32; maximum: 512; step: 16; suffix: " MB";
+    minimum: 32; maximum: 512; step: 16; suffix: " MiB";
 }
 export component CacheClearControl inherits PillButton {
     in property <bool> busy: false;
