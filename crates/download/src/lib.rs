@@ -731,7 +731,11 @@ pub fn format_percent(downloaded: u64, total: Option<u64>) -> String {
     if total == 0 {
         return "100%".into();
     }
-    let percent = (downloaded as f64 / total as f64 * 100.0).clamp(0.0, 100.0);
+    if downloaded >= total {
+        return "100%".into();
+    }
+    // Floor and cap so 99.5%+ does not read "100%" while bytes are still missing.
+    let percent = (downloaded as f64 / total as f64 * 100.0).floor().min(99.0);
     format!("{percent:.0}%")
 }
 
@@ -905,6 +909,16 @@ pub fn part_path(destination: impl AsRef<Path>) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percent_never_shows_100_before_completion() {
+        assert_eq!(format_percent(995, Some(1000)), "99%");
+        assert_eq!(format_percent(9999, Some(10000)), "99%");
+        assert_eq!(format_percent(1000, Some(1000)), "100%");
+        assert_eq!(format_percent(0, Some(0)), "100%");
+        assert_eq!(format_percent(1, Some(1000)), "0%");
+        assert_eq!(format_percent(5, None), "—");
+    }
 
     #[test]
     fn intro_metadata_preserves_legacy_json_and_round_trips_provider_coordinates() {
