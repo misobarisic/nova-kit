@@ -54,14 +54,6 @@ export global SyncBridge {
     callback sync_respond_pair(string, bool);
 }
 
-export { SettingSyncBadge } from "../slint/settings-sync.slint";
-export component SettingsRow inherits Rectangle {
-    in property <string> setting-key;
-    in property <string> row-title;
-    in property <string> row-desc;
-    in property <bool> tinted;
-    VerticalLayout { @children }
-}
 export global SyncContent {
     in-out property <bool> advanced_visible: true;
     in-out property <bool> input_focused: false;

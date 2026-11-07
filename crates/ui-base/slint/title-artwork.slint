@@ -1,0 +1,47 @@
+import { Theme } from "@NovaUiShared";
+
+
+// Title logos are optional decoration. Text remains the title and the fallback
+// while artwork is missing/loading; the image has the same accessible label.
+export component TitleArtwork inherits Rectangle {
+    in property <string> title;
+    in property <image> logo;
+    in property <length> font-size: 44px;
+    in property <length> logo-height: 100px;
+    in property <int> max-lines: 2;
+    // Detail can replace fallback text with an asynchronously loaded logo.
+    // Reserve both shapes so the controls below do not move when it arrives.
+    in property <bool> reserve-logo-space: false;
+    // 0 = left, 1 = center, 2 = right.
+    in property <int> title-alignment: 0;
+    property <bool> has-logo: root.logo.width > 0 && root.logo.height > 0;
+    property <length> fitted-logo-height: Math.min(root.logo-height, root.width * root.logo.height / Math.max(1, root.logo.width));
+    height: root.reserve-logo-space ? Math.max(root.logo-height, title_text.preferred-height) : root.has-logo
+        ? root.fitted-logo-height
+        : title_text.preferred-height;
+    min-width: 0px;
+
+    if root.has-logo: title_logo := Image {
+        x: root.title-alignment == 2 ? root.width - self.width
+            : root.title-alignment == 1 ? (root.width - self.width) / 2 : 0px;
+        y: 0px;
+        width: Math.min(root.width, root.fitted-logo-height * root.logo.width / Math.max(1, root.logo.height));
+        height: root.fitted-logo-height;
+        source: root.logo;
+        image-fit: contain;
+        accessible-label: root.title;
+    }
+    title_text := Text {
+        x: 0px; y: 0px;
+        visible: !root.has-logo;
+        width: 100%;
+        text: root.title;
+        horizontal-alignment: root.title-alignment == 2 ? right : root.title-alignment == 1 ? center : left;
+        font-size: root.font-size;
+        font-weight: 800;
+        color: Theme.current.text_bright;
+        max-lines: root.max-lines;
+        wrap: word-wrap;
+        overflow: elide;
+    }
+}

@@ -803,6 +803,7 @@ export component SettingsBackButton inherits Rectangle {
     border-color: Theme.current.focus_ring;
     accessible-role: button;
     accessible-label: @tr("Back");
+    accessible-action-default => { root.clicked(); }
     forward-focus: back_focus;
     IcChevronLeft { width: 20px; height: 20px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; fill: Theme.current.text_settings; }
     back_focus := FocusScope {

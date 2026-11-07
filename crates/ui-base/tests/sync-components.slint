@@ -1,5 +1,8 @@
 import { SyncSettingsPage } from "@NovaUiBase/sync-settings.slint";
 import { SettingSyncModal } from "@NovaUiBase/settings-sync-modal.slint";
+import { SettingsRow } from "@NovaUiBase/settings-row.slint";
+import { PageHeader } from "@NovaUiBase/page-header.slint";
+import { TitleArtwork } from "@NovaUiBase/title-artwork.slint";
 import { SyncPeerRemovalModal } from "@NovaUiBase/sync-peer-removal.slint";
 export component SyncComponentsSmoke inherits Window {
     width: 390px; height: 844px;
@@ -9,4 +12,9 @@ export component SyncComponentsSmoke inherits Window {
     }
     SettingSyncModal { narrow: true; }
     SyncPeerRemovalModal {}
+    VerticalLayout {
+        PageHeader { title: "Settings"; subtitle: "Preferences"; narrow: true; }
+        TitleArtwork { title: "Title"; }
+        SettingsRow { setting-key: "k"; row-title: "Row"; row-desc: "Description"; }
+    }
 }

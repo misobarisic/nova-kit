@@ -58,9 +58,15 @@ inline Slint fixtures. No second compiled global bundle is introduced.
 `Dropdown` rows draw their focus ring while the keyboard or a TV remote drives
 the popup (`keyboard-input-enabled`), so hosts need no source patches for either.
 
+`SettingsRow`, `PageHeader` and `TitleArtwork` are shared too, so the sync page
+no longer imports its row from the host. `SettingsRow` reads the host's
+`SettingsSync` and `InterfaceStyle` and shows the Settings search highlight only
+when the host's `SettingsHighlight` global is enabled (`host-globals.slint` ships
+a disabled one). `SettingsBackButton` answers the assistive-technology default
+action.
+
 App pages, navigation routing, domain models and Settings bridges remain in Nova.
-Its old component paths are compatibility imports. App-specific SettingsRow
-and SettingsSearchHighlight remain in Nova's settings-controls.
+Its old component paths are compatibility imports.
 The shared `cache-settings-controls.slint` now contains Nova's actual numeric
 and cache controls; app-specific settings rows, search highlighting and
 persistence bridges remain application adapters.

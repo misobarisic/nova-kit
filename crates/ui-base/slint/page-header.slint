@@ -1,0 +1,39 @@
+import { InterfaceStyle, Theme } from "@NovaUiShared";
+import { SettingsBackButton } from "settings-controls.slint";
+
+// Root destinations use the same unpadded heading lane as Discover. The host
+// owns its 18px gutter, safe areas and navigation footprint.
+export component PageHeader inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> narrow;
+    in property <bool> show-back: root.narrow;
+    in property <bool> back-focused;
+    callback back();
+    vertical-stretch: 0;
+    height: heading.height + (root.subtitle != "" ? 8px + description.preferred-height : 0px);
+    heading := Rectangle {
+        x: 0px; y: 0px; width: 100%;
+        height: Math.max(44px, title_text.preferred-height);
+        if root.show-back: SettingsBackButton {
+            x: 0px; y: (heading.height - self.height) / 2;
+            focused: root.back-focused;
+            clicked => { root.back(); }
+        }
+        title_text := Text {
+            x: root.show-back ? 56px : 0px; y: 0px;
+            width: parent.width - self.x; height: parent.height;
+            text: root.title;
+            font-size: InterfaceStyle.tv ? 42px : (root.narrow ? 28px : 32px); font-weight: 700;
+            color: Theme.current.text_bright;
+            vertical-alignment: center; wrap: word-wrap;
+        }
+    }
+    description := Text {
+        x: 0px; y: heading.height + 8px; width: 100%;
+        height: root.subtitle != "" ? self.preferred-height : 0px;
+        visible: root.subtitle != "";
+        text: root.subtitle; font-size: InterfaceStyle.tv ? 18px : 14px;
+        color: Theme.current.text_secondary; wrap: word-wrap;
+    }
+}

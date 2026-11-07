@@ -22,6 +22,15 @@ export global SettingsStyle {
     }
 }
 
+// Settings search for rows. A host without it keeps `enabled` false and rows
+// draw no highlight overlay.
+export global SettingsHighlight {
+    out property <bool> enabled: false;
+    out property <bool> pending: false;
+    pure public function is-target(key: string) -> bool { false }
+    public function reveal(y: length, height: length) { }
+}
+
 export global ControlInput {
     in-out property <bool> touch-feedback: false;
 }

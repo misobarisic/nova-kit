@@ -1,0 +1,173 @@
+import { SettingsSync, InterfaceStyle, Theme, SettingsHighlight } from "@NovaUiShared";
+import { SettingSyncBadge } from "settings-sync.slint";
+
+// Settings search reveals the row it found. The overlay waits for the mounted
+// anchor, which avoids guessing row offsets in the shell or racing the shell's
+// saved-scroll restoration on the first layout frame. The decision and the
+// scroll request belong to the host's `SettingsHighlight`; hosts without Settings
+// search leave it disabled and rows add nothing.
+export component SettingsSearchHighlight inherits Rectangle {
+    in property <string> setting-key;
+    out property <bool> highlighted: SettingsHighlight.is-target(root.setting-key);
+    width: 100%; height: 100%;
+    accessible-role: groupbox;
+    accessible-id: root.highlighted ? "setting-highlight:" + root.setting-key : "";
+    background: root.highlighted ? Theme.current.settings_selected_wash : transparent;
+    border-width: root.highlighted ? 2px : 0px;
+    border-color: Theme.current.focus_ring;
+    border-radius: 8px;
+    Timer {
+        interval: 32ms;
+        running: root.highlighted && SettingsHighlight.pending;
+        triggered => {
+            // Read the current request, rather than retaining a stale row or
+            // callback across Back, another search, or a leaf replacement.
+            if root.highlighted && root.width > 0px && root.height > 0px {
+                SettingsHighlight.reveal(root.absolute-position.y, root.height);
+            }
+        }
+    }
+}
+
+// One setting row: title + description on the left, any control(s) after.
+// Rows share a solid card surface and separate with inset rules.
+export component SettingsRow inherits Rectangle {
+    min-width: 0px;
+    in property <string> setting-key: "";
+    in property <string> row-title: "";
+    in property <string> row-desc: "";
+    accessible-role: groupbox;
+    accessible-id: root.setting-key == "" ? "" : "setting:" + root.setting-key;
+    // Section-like rows have no trailing control to reserve a text column for.
+    in property <bool> full-width-text: false;
+    in property <bool> tinted: false;
+    in property <length> row-min-height: InterfaceStyle.tv ? 88px : 64px;
+    background: Theme.current.card;
+    if SettingsHighlight.enabled: SettingsSearchHighlight { setting-key: root.setting-key; }
+
+    property <length> inner-width: Math.max(0px, self.width - 32px);
+    property <length> control-width: controls.preferred-width;
+    property <length> control-height: controls.preferred-height;
+    // Keep the text column from sprawling across a very wide settings card,
+    // while making its narrow-width limit explicit instead of splitting free
+    // space with an invisible spacer.
+    property <length> side-text-width: root.full-width-text ? root.inner-width : Math.min(
+    Math.max(0px, root.inner-width - root.control-width - 16px),
+    root.inner-width * 0.62
+    );
+    property <bool> stack-controls: root.side-text-width < (root.setting-key != "" && SettingsSync.enabled && SettingsSync.rows[SettingsSync.lookup(root.setting-key)].status == 2 ? 200px : 150px);
+    property <length> badge-line-width: title_natural.preferred-width + badge_natural.preferred-width + 34px + 8px;
+    property <bool> badge-can-fit: root.setting-key != "" && SettingsSync.enabled
+        && root.badge-line-width <= (root.stack-controls ? root.inner-width : Math.max(0px, root.inner-width - root.control-width - 16px));
+    property <length> text-width: root.stack-controls
+        ? root.inner-width
+        : (root.badge-can-fit ? Math.max(root.side-text-width, root.badge-line-width) : root.side-text-width);
+    property <bool> inline-badge: root.badge-can-fit && root.badge-line-width <= root.text-width;
+    // Natural text sizes decide badge placement without widening the row.
+    Rectangle {
+        width: 0px;
+        height: 0px; clip: true;
+        title_natural := Text { width: 0px; height: 0px; text: root.row-title; font-size: InterfaceStyle.tv ? 22px : 16px; font-weight: 600; }
+        badge_natural := Text {
+            width: 0px; height: 0px;
+            text: SettingsSync.rows[SettingsSync.lookup(root.setting-key)].status == 1 ? @tr("Synced")
+                : SettingsSync.rows[SettingsSync.lookup(root.setting-key)].status == 2 ? @tr("This device (overridden)") : @tr("This device");
+            font-size: InterfaceStyle.tv ? 16px : 11px; font-weight: 600;
+        }
+    }
+    property <length> text-height: measure_col.preferred-height;
+
+    // Keep at least 150px for a readable text column. Rows whose controls
+    // would crowd it instead put the controls on a second line; small controls
+    // such as toggles stay beside their text. The wrapped measurement is at
+    // that same live text width, so both layouts reserve enough height for
+    // titles and descriptions that wrap.
+    height: Math.max(
+    row-min-height,
+    28px + (root.stack-controls
+    ? root.text-height + 10px + root.control-height
+    : Math.max(root.text-height, root.control-height))
+    );
+
+    Rectangle { x: 16px; y: parent.height - 1px; width: Math.max(0px, parent.width - 32px); height: 1px; background: Theme.current.border_subtle; }
+
+    title_col := VerticalLayout {
+        x: 16px;
+        y: root.stack-controls
+        ? 14px
+        : (root.height - self.height) / 2;
+        width: root.text-width;
+        height: root.text-height;
+        alignment: center;
+        spacing: 3px;
+
+        title_line := Rectangle {
+            height: Math.max(title_text.preferred-height, root.inline-badge ? 26px : 0px)
+                + (root.setting-key != "" && SettingsSync.enabled && !root.inline-badge ? 29px : 0px);
+            title_text := Text {
+                x: 0px;
+                text: root.row-title; font-size: InterfaceStyle.tv ? 22px : 16px; font-weight: 600;
+                color: Theme.current.text_bright; wrap: word-wrap; min-width: 0px;
+                width: root.inline-badge ? title_natural.preferred-width : parent.width;
+                height: self.preferred-height;
+                y: root.inline-badge ? (parent.height - self.height)/2 : 0px;
+            }
+            if root.setting-key != "" && SettingsSync.enabled: scope_badge := SettingSyncBadge {
+                setting_key: root.setting-key; setting_title: root.row-title;
+                width: Math.min(self.preferred-width, root.text-width);
+                x: root.inline-badge ? title_natural.preferred-width + 8px : 0px;
+                y: root.inline-badge ? (parent.height - self.height)/2 : title_text.preferred-height + 3px;
+            }
+        }
+
+        if row-desc != "": Text {
+            text: row-desc;
+            font-size: InterfaceStyle.tv ? 20px : 14px;
+            color: Theme.current.text_settings;
+            min-width: 0px;
+            wrap: word-wrap;
+        }
+    }
+
+    // A single slot keeps caller-provided controls intact (including grouped
+    // controls). It is right-aligned beside the text when there is room, and
+    // left-aligned below it when the control group would leave under 150px for
+    // the label and description.
+    controls := HorizontalLayout {
+        x: root.stack-controls
+        ? 16px
+        : root.width - 16px - root.control-width;
+        y: root.stack-controls
+        ? 14px + root.text-height + 10px
+        : (root.height - self.height) / 2;
+        width: root.stack-controls ? root.inner-width : root.control-width;
+        height: root.control-height;
+        alignment: start;
+
+        @children
+    }
+
+    // Hidden measurement copy of the whole text column (same text, fonts,
+    // width and spacing as `title_col`; clipped to zero height so it renders
+    // nothing) — its natural wrapped height drives the row minimum above.
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        height: 0;
+        clip: true;
+
+        measure_col := VerticalLayout {
+            width: title_col.width;
+            spacing: 3px;
+
+            Rectangle { height: title_line.height; }
+
+            if row-desc != "": Text {
+                text: row-desc;
+                font-size: InterfaceStyle.tv ? 20px : 14px;
+                wrap: word-wrap;
+                min-width: 0px;
+            }
+        }
+    }
+}
