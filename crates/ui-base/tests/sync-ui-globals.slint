@@ -1,5 +1,6 @@
 export { Theme, ThemePalette, Anim, InterfaceStyle, SettingsStyle, ControlInput, SliderGesture, SheetItem } from "../slint/host-globals.slint";
-export struct SettingSyncInfo { can_override: bool, key: string, status: int, local_value: string, shared_value: string, has_shared: bool, shared_supported: bool }
+import { SettingSyncInfo } from "../slint/sync-types.slint";
+export { SettingSyncInfo }
 
 export global SettingsSync {
     in-out property <[SettingSyncInfo]> rows;

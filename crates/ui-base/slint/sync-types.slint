@@ -1,0 +1,12 @@
+// Row model of the Settings sync scope UI (`settings-sync.slint`,
+// `settings-sync-modal.slint`). Hosts expose it through their NovaUiShared
+// contract and fill `SettingsSync.rows` with it.
+export struct SettingSyncInfo {
+    can_override: bool,
+    key: string,
+    status: int,
+    local_value: string,
+    shared_value: string,
+    has_shared: bool,
+    shared_supported: bool,
+}
