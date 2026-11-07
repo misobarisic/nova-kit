@@ -25,7 +25,7 @@
 mod configuration;
 mod frame;
 mod hlc;
-mod local;
+pub mod local;
 mod merge;
 mod package;
 mod pair;
@@ -43,7 +43,10 @@ pub use policy::{RecordPolicy, configure_record_policy};
 mod protocol;
 mod store;
 mod ticket;
-pub use local::{commit_snapshot, local_device, local_store, prepare_snapshot, preserve_unknown};
+pub use local::{
+    commit_snapshot, local_device, local_store, prepare_snapshot, preserve_unknown, publish,
+    replace_domain, stage, stage_with,
+};
 
 pub use hlc::Hlc;
 pub use merge::{Record, Version};
