@@ -12,9 +12,16 @@ redb = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 zstd = { version = "0.13", default-features = false }
+# Bounded ZIP reading (`nova_storage::zip`); off unless a consumer opts in.
+zip = { version = "2.4", default-features = false, features = ["deflate"], optional = true }
+
+[features]
+zip = ["dep:zip"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# Run the feature-gated zip tests as part of a plain `cargo test -p nova-storage`.
+nova-storage = { path = ".", features = ["zip"] }

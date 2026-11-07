@@ -9,6 +9,9 @@ mod codec;
 mod collections;
 pub use collections::{CollectionKind, register_collection};
 pub mod fs;
+/// Bounded validating ZIP reader; enabled by the `zip` feature.
+#[cfg(feature = "zip")]
+pub mod zip;
 
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use std::collections::BTreeMap;
