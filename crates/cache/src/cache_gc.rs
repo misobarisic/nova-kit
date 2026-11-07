@@ -14,6 +14,59 @@ pub const ROUTINE_INTERVAL_SECS: u64 = 24 * 60 * 60;
 const INDEX_NAME: &str = ".image-usage-v1.json";
 const MAX_INDEX_BYTES: u64 = 32 * 1024 * 1024;
 
+/// Device-local "last cleanup finished" hint kept in `nova-storage` under one
+/// key per cache. Applications implement [`Backend::last_cleanup`] and
+/// [`Backend::save_cleanup`] with it instead of storing a bare timestamp.
+///
+/// The value records the cache directory it was written for, so a marker left
+/// by a cache that has since moved never postpones the new cache's cleanup. A
+/// missing, corrupt, legacy or moved marker reads as "never cleaned" (cleanup
+/// is due); a failing store is an error, not silence.
+#[derive(Clone, Debug)]
+pub struct Marker {
+    key: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredMarker {
+    directory: PathBuf,
+    completed: u64,
+}
+
+impl Marker {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into() }
+    }
+
+    /// Completion time recorded for exactly this `directory`, if any.
+    pub fn load(&self, directory: &Path) -> io::Result<Option<u64>> {
+        let raw = nova_storage::try_get_str(&self.key).map_err(io::Error::other)?;
+        Ok(raw.and_then(|raw| Self::decode(&raw, directory)))
+    }
+
+    pub fn save(&self, directory: &Path, completed: u64) -> io::Result<()> {
+        nova_storage::try_set_str(&self.key, &Self::encode(directory, completed)?)
+            .map_err(io::Error::other)
+    }
+
+    /// The stored text for a completed cleanup of `directory`.
+    pub fn encode(directory: &Path, completed: u64) -> io::Result<String> {
+        serde_json::to_string(&StoredMarker {
+            directory: directory.to_owned(),
+            completed,
+        })
+        .map_err(io::Error::other)
+    }
+
+    /// The completion time in `raw`, if it belongs to `directory`.
+    pub fn decode(raw: &str, directory: &Path) -> Option<u64> {
+        serde_json::from_str::<StoredMarker>(raw)
+            .ok()
+            .filter(|marker| marker.directory == directory)
+            .map(|marker| marker.completed)
+    }
+}
+
 /// Marker and title references are local metadata supplied by the application.
 pub trait Backend: Send + Sync + 'static {
     fn policy(&self) -> DiskPolicy {

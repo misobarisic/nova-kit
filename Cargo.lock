@@ -3395,9 +3395,11 @@ dependencies = [
  "image",
  "libc",
  "nova-image",
+ "nova-storage",
  "serde",
  "serde_json",
  "slint",
+ "tempfile",
  "webp",
 ]
 
