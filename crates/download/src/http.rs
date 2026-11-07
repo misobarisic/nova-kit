@@ -1,7 +1,5 @@
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "android")]
-use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use reqwest::header::{
@@ -39,15 +37,8 @@ pub fn new_http_client() -> Result<Client, DownloadError> {
 
 #[cfg(target_os = "android")]
 pub fn new_http_client() -> Result<Client, DownloadError> {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(|error| DownloadError::InvalidResponse(error.to_string()))?
-    .with_root_certificates(roots)
-    .with_no_client_auth();
+    let config = nova_net::tls::client_config()
+        .map_err(|error| DownloadError::InvalidResponse(error.to_string()))?;
     Client::builder()
         .tls_backend_preconfigured(config)
         .connect_timeout(CONNECT_TIMEOUT)

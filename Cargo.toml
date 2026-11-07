@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/storage", "crates/addons", "crates/download", "crates/ui-base", "crates/cache", "crates/image", "crates/sync", "crates/playback-api"]
+members = ["crates/storage", "crates/net", "crates/addons", "crates/download", "crates/ui-base", "crates/cache", "crates/image", "crates/sync", "crates/playback-api"]
 exclude = ["vendor/ferri-pdf-rav1d"]
 resolver = "3"
 

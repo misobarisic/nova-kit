@@ -3408,13 +3408,12 @@ dependencies = [
  "aws-lc-rs",
  "httpdate",
  "m3u8-rs",
+ "nova-net",
  "nova-storage",
  "reqwest",
- "rustls",
  "serde",
  "serde_json",
  "tokio",
- "webpki-roots",
 ]
 
 [[package]]
@@ -3431,6 +3430,16 @@ dependencies = [
  "ravif",
  "thiserror 2.0.20",
  "yuv",
+]
+
+[[package]]
+name = "nova-net"
+version = "0.1.0"
+dependencies = [
+ "nova-net",
+ "reqwest",
+ "rustls",
+ "webpki-roots",
 ]
 
 [[package]]

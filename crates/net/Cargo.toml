@@ -1,0 +1,24 @@
+[package]
+name = "nova-net"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+description = "Network policy shared by the Nova applications: public-address filter, bundled-root TLS, HTTPS-only redirects and capped body reads"
+
+[features]
+# The Android client configuration with bundled Mozilla roots (no platform
+# verifier, no JNI). Applications enable it for Android targets only.
+rustls = ["dep:rustls", "dep:webpki-roots"]
+# Redirect policies for reqwest clients.
+reqwest = ["dep:reqwest"]
+
+[dependencies]
+reqwest = { version = "0.13.4", default-features = false, optional = true }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws-lc-rs"], optional = true }
+webpki-roots = { version = "1", optional = true }
+
+[dev-dependencies]
+# Run the feature-gated tests as part of a plain `cargo test -p nova-net`.
+nova-net = { path = ".", features = ["rustls", "reqwest"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls"] }
