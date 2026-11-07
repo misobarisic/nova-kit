@@ -241,7 +241,9 @@ export component Dropdown inherits Rectangle {
                                 }
                             }
                             border-radius: root.prominent ? 10px : 4px;
-                            border-width: root.keyboard-input-enabled && index == root.popup-index ? 2px : 0px;
+                            // The highlighted row only shows a focus ring while the keyboard
+                            // (or a TV remote) is driving the popup, not after a pointer opens it.
+                            border-width: root.keyboard-input-enabled && (InterfaceStyle.tv || SettingsStyle.keyboard-mode) && index == root.popup-index ? 2px : 0px;
                             border-color: Theme.current.focus_ring;
                             row_hover := FeedbackProgress { active: item_touch.feedback-active; motion: Anim.enabled && Anim.hover; duration: Anim.hover_fast; }
                             row_selection := FeedbackProgress { active: index == root.current-index; }

@@ -240,12 +240,14 @@ export component MenuSheet inherits Rectangle {
                                     accessible-role: button;
                                     accessible-label: it.label;
                                     accessible-enabled: it.enabled;
+                                    accessible-action-default => { if root.open && it.enabled { root.picked(i); } }
                                 }
                                 if root.selected_index >= 0: Rectangle {
                                     width: 100%; height: 100%;
                                     accessible-role: radio-button;
                                     accessible-label: it.label;
                                     accessible-enabled: it.enabled;
+                                    accessible-action-default => { if root.open && it.enabled { root.picked(i); } }
                                     accessible-checkable: true;
                                     accessible-checked: root.selected_index == i;
                                 }
@@ -292,6 +294,10 @@ export component MenuSheet inherits Rectangle {
                     Rectangle {
                         height: InterfaceStyle.tv ? 64px : 48px;
                         vertical-stretch: 0;
+                        // Assistive technology activates Cancel like the touch area below.
+                        accessible-role: button;
+                        accessible-label: @tr("Cancel");
+                        accessible-action-default => { if root.open { root.closed(); } }
                         border-radius: 8px;
                         border-width: root.keyboard_navigation && (InterfaceStyle.tv || SettingsStyle.keyboard-mode) && root.tv-index == root.items.length ? 2px : 0px;
                         border-color: Theme.current.focus_ring;
