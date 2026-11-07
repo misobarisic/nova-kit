@@ -146,6 +146,17 @@ scoped to the cache directory it was written for. `nova_sync::stage`,
 the live store only after a durable commit; `replace_domain` restores a domain
 to an exact record set.
 
+`nova_sync::profiles::directory` owns the profile directory lifecycle both
+applications used to copy: the `profiles` and `profile_deletions` domains, name
+and record validation (`validate_record`, installed through the application's
+`RecordPolicy`), listing, creation, and `Directory::retire`, which stages a
+deletion (child tombstones, retirement marker, durable keys and baselines) on a
+clone of the record owner and publishes it with one durable save. Cleanup of
+profiles retired on a peer re-tombstones late children and removes this
+device's data. Applications supply a `Host` for what only they know (their
+write serializer, notifications, caches) and keep the selection, the preconditions
+of a deletion and the user-facing messages.
+
 `nova-backup` owns the backup container and its limits. Applications implement
 `archive::Schema` (known components, payload validation, package validation);
 applying and undoing a restore stay with each application.

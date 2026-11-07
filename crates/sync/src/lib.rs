@@ -32,7 +32,7 @@ mod pair;
 #[cfg(feature = "playback")]
 mod playback;
 mod policy;
-mod profiles;
+pub mod profiles;
 #[cfg(feature = "nova-progress")]
 mod progress;
 #[cfg(not(feature = "nova-progress"))]

@@ -1,6 +1,8 @@
 //! Profile namespaces remain ordinary domain strings on the wire. The account's
 //! membership and profile directory therefore travel alongside every profile.
 
+pub mod directory;
+
 /// Qualify one domain with an immutable profile ID. IDs cannot contain `:`.
 pub fn profile_domain(profile: &str, domain: &str) -> String {
     assert!(!profile.is_empty() && !profile.contains(':'));
