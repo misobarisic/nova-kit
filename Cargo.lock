@@ -3393,8 +3393,8 @@ version = "0.1.0"
 dependencies = [
  "aws-lc-rs",
  "httpdate",
- "libc",
  "m3u8-rs",
+ "nova-storage",
  "reqwest",
  "rustls",
  "serde",
@@ -3430,6 +3430,7 @@ dependencies = [
 name = "nova-storage"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "redb",
  "serde",
  "serde_json",

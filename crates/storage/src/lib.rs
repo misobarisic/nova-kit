@@ -8,6 +8,7 @@
 mod codec;
 mod collections;
 pub use collections::{CollectionKind, register_collection};
+pub mod fs;
 
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use std::collections::BTreeMap;
