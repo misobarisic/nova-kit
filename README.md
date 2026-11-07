@@ -9,12 +9,14 @@ consumer integration contracts.
 | --- | --- |
 | `nova-sync` | HLC record engine, durable snapshots, authenticated pairing/membership, package transport and optional Nova playback/progress policies |
 | `nova-playback-api` | Optional Nova video remote-control models; omitted by Reader |
-| `nova-storage` | redb JSON storage, atomic batches, collections, compressed metadata and durable sequences |
+| `nova-storage` | redb JSON storage, atomic batches, collections, compressed metadata and durable sequences; `fs` (atomic writes, private directories, free space) and the optional `zip` bounded archive reader |
 | `addons` | Stremio addon URL builders, protocol types and response parsing, with an optional blocking HTTP client |
 | `nova-download` | Existing download jobs, HTTP resume, finite HLS bundles, cancellation, filesystem capacity and offline budgeting |
 | `nova-ui-base` | Slint source components, theme/animation tokens and associated assets |
 | `nova-cache` | Nova's processed image variants, decoded LRU, atomic encoded-page cache, batched usage index and incremental grouped eviction |
 | `nova-image` | Shared bounded AVIF/JPEG XL still codecs and incremental JPEG XL previews, shared by Nova and Reader |
+| `nova-net` | Public-address filter, the Android bundled-root TLS configuration, the HTTPS-only redirect policy and capped body reads |
+| `nova-backup` | The portable backup ZIP/JSON container: manifest, limits, checksums and strict decoding behind an application `Schema` |
 
 Storage was extracted from Nova commit
 `7a0cb47d0977fdb64601af4f37a6e7d53b6f5e45`. Addons, downloads and UI components
@@ -37,7 +39,9 @@ assets. Lucide SVG attribution and license notices are retained beside the icons
 
 Components import the host's `@NovaUiShared` globals. The minimal compatible
 contract is provided in `slint/host-globals.slint`: Theme, ThemePalette, Anim,
-InterfaceStyle, SettingsStyle, ControlInput, SliderGesture and SheetItem.
+InterfaceStyle, SettingsStyle, ControlInput, SliderGesture, SheetItem and
+SettingSyncInfo (the Settings sync row model, defined once in `sync-types.slint`
+so hosts re-export it instead of redeclaring it).
 Nova supplies those through its existing compiled shared library, preserving
 native global identity, page factories and app-owned translation catalogs.
 Other apps can provide a compatible source or compiled host contract.
@@ -49,6 +53,10 @@ library. Components can then be imported from `@NovaUiBase/dropdown.slint`, etc.
 The Cargo package also exposes `DEP_NOVAUIBASE_SLINT_SOURCE_DIR` metadata.
 Nova's compiler extension reads that metadata for source-only imports, including
 inline Slint fixtures. No second compiled global bundle is introduced.
+
+`MenuSheet` rows and Cancel expose assistive-technology default actions, and
+`Dropdown` rows draw their focus ring while the keyboard or a TV remote drives
+the popup (`keyboard-input-enabled`), so hosts need no source patches for either.
 
 App pages, navigation routing, domain models and Settings bridges remain in Nova.
 Its old component paths are compatibility imports. App-specific SettingsRow
@@ -112,6 +120,35 @@ that a source is lossless. `lossless_input_requires_original` identifies 16-bit
 PNG, which the 8-bit processing path must retain rather than silently reducing
 precision when lossless compression is requested. These helpers classify source
 encoding; normal bounded image admission is still required.
+
+## Shared file, archive and network helpers
+
+`nova_storage::fs` holds the one durable `atomic_write` (unique sibling
+temporary, file and directory fsync, owner-only on Unix), `private_dir` and
+`available_bytes`; `nova-download` re-exports the capacity queries. Disposable
+caches may ask for `Durability::File`; layouts whose recovery recognizes a fixed
+temporary name use `atomic_write_via`.
+
+`nova_storage::zip` (feature `zip`) opens untrusted archives against `Limits`
+and a `Policy`. The `zip` crate folds duplicate central-directory records into
+one name, so the reader walks the raw directory itself and refuses an archive
+whose records disagree with the crate's view, before handing out any entry.
+Addon packages, backups and comic imports all go through it.
+
+`nova-net` keeps the three transport rules the apps used to copy: `is_public_ip`,
+`tls::client_config` (feature `rustls`, Android only: bundled Mozilla roots and
+an explicit aws-lc-rs provider) and `redirect::https_only` (feature `reqwest`).
+`read_capped` bounds any body or file read.
+
+`nova_cache::gc::Marker` stores the "last cleanup" hint under one key and is
+scoped to the cache directory it was written for. `nova_sync::stage`,
+`stage_with` and `publish` clone the live store, mutate the clone and replace
+the live store only after a durable commit; `replace_domain` restores a domain
+to an exact record set.
+
+`nova-backup` owns the backup container and its limits. Applications implement
+`archive::Schema` (known components, payload validation, package validation);
+applying and undoing a restore stay with each application.
 
 ## Development
 
