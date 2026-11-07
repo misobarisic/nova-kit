@@ -1,0 +1,21 @@
+[package]
+name = "nova-android"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+
+# JNI plumbing the Android applications share: the Application context, class
+# lookup, headless bootstrap, exception hygiene and the download foreground
+# service. The service state machine, the pending-request slot and the Java
+# templates are plain Rust and run in host tests. The JVM-facing `context`
+# module needs the `jni` feature, which the applications enable for Android
+# only; `invocation` lets this crate's own tests start a JVM on the host.
+
+[features]
+default = []
+jni = ["dep:jni"]
+invocation = ["jni", "jni/invocation"]
+
+[dependencies]
+jni = { version = "0.21", optional = true }

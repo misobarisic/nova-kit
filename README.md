@@ -17,6 +17,7 @@ consumer integration contracts.
 | `nova-image` | Shared bounded AVIF/JPEG XL still codecs and incremental JPEG XL previews, shared by Nova and Reader |
 | `nova-net` | Public-address filter, the Android bundled-root TLS configuration, the HTTPS-only redirect policy and capped body reads |
 | `nova-backup` | The portable backup ZIP/JSON container: manifest, limits, checksums and strict decoding behind an application `Schema` |
+| `nova-android` | Android JNI glue: the retained Application context, class lookup, headless bootstrap, exception clearing, the download foreground service state machine and its rendered Java source, and the pending-request slot |
 
 Storage was extracted from Nova commit
 `7a0cb47d0977fdb64601af4f37a6e7d53b6f5e45`. Addons, downloads and UI components
@@ -166,6 +167,35 @@ of a deletion and the user-facing messages.
 `nova-backup` owns the backup container and its limits. Applications implement
 `archive::Schema` (known components, payload validation, package validation);
 applying and undoing a restore stay with each application.
+
+## Android glue
+
+`nova-android` keeps the JNI conventions both applications share. All Android
+API calls stay in Java; Rust loads a class through the Application context's
+class loader and calls a static method. The `context` module (feature `jni`,
+which the applications enable for Android only) retains the Application, never
+an Activity or `ndk-context`, so foreground startup and headless jobs feed one
+slot. `with_app_context` clears a pending Java exception instead of leaving it
+on an event-loop thread, `app_class` caches class lookups, and `files_dir`
+supplies the storage path a job-only process needs before anything else runs.
+
+`service::DownloadService` is the start/update/stop state machine of the
+download foreground service: it starts on the first busy tick, refreshes the
+notification at most once a second and stops on the falling edge. A start the
+platform rejects clears the state so the next busy tick retries it. The
+platform side is a `Driver`; `context::JniDriver` calls a Java class with static
+`start`, `stop` and `update`. `slot::Slot` holds the one outstanding picker or
+scan request whose answer arrives on a foreign thread.
+
+`java::Names` renders the download service's Java source from one template
+(package, class prefix, channel ID and wake-lock tag). cargo-apk2 compiles
+`android/java` from a fixed directory, so each application keeps the rendered
+file and checks in a test that it equals the rendering.
+
+Everything but `context` builds on every host and is tested there. The JNI
+code is exercised against a real JVM with a few stand-ins for the Android
+framework: `cargo test -p nova-android --features invocation --test jvm` (needs a
+JDK).
 
 ## Development
 
