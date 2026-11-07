@@ -6,9 +6,13 @@
 //! use reqwest's defaults and do not call this.
 use std::sync::Arc;
 
+/// The configuration type, re-exported so callers that only hand it to
+/// `reqwest::ClientBuilder::tls_backend_preconfigured` need no `rustls` dependency.
+pub use rustls::ClientConfig;
+
 /// A client configuration verifying servers against the bundled Mozilla roots,
 /// using the aws-lc-rs provider and rustls' safe default protocol versions.
-pub fn client_config() -> Result<rustls::ClientConfig, rustls::Error> {
+pub fn client_config() -> Result<ClientConfig, rustls::Error> {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     Ok(rustls::ClientConfig::builder_with_provider(Arc::new(
