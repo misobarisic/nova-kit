@@ -4,7 +4,7 @@
 //! Every application used to carry its own copy of these with different
 //! durability. The strongest variant lives here; callers that deliberately want
 //! less (disposable caches) pick it explicitly through [`Durability`].
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -123,7 +123,7 @@ fn sync_parent(path: &Path) -> io::Result<()> {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     };
-    File::open(parent)?.sync_all()
+    fs::File::open(parent)?.sync_all()
 }
 
 // Windows cannot open a directory as a file; NTFS journals the rename itself.
