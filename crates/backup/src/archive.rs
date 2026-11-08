@@ -2,12 +2,12 @@
 //!
 //! The container, its limits and its integrity checks live here; what a
 //! component means is supplied by the application as a [`Schema`].
-use nova_storage::zip::{self as bounded, Archive as Zip, Limits, Policy};
+use nova_storage::zip::{self as bounded, Archive as Zip, Limits, Policy, Streamed};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Read, Seek, Write};
 
 /// Largest archive, and the largest total expanded content.
 pub const MAX_BYTES: usize = 128 * 1024 * 1024;
@@ -15,6 +15,13 @@ pub const MAX_BYTES: usize = 128 * 1024 * 1024;
 pub const MAX_FILE: u64 = 32 * 1024 * 1024;
 pub const MAX_ENTRIES: usize = 4096;
 pub const MAX_RECORDS: usize = 200_000;
+/// Entries under this prefix are opaque files that an application streams in
+/// and out ([`Writer::blob`], [`decode_reader`]): large, uncompressed and
+/// outside every limit above except [`MAX_BLOBS`]. The manifest does not list
+/// them; the application's own components declare and verify what they hold.
+pub const BLOB_PREFIX: &str = "blobs/";
+/// Most streamed entries accepted in addition to [`MAX_ENTRIES`].
+pub const MAX_BLOBS: usize = 262_144;
 pub type LocalValues = BTreeMap<String, Option<String>>;
 pub type UndoLocal = (LocalValues, LocalValues);
 
@@ -136,70 +143,152 @@ pub fn encode(
     encode_with_packages(manifest, payloads, &BTreeMap::new())
 }
 pub fn encode_with_packages(
-    mut manifest: Manifest,
+    manifest: Manifest,
     payloads: &BTreeMap<(String, String), Payload>,
     packages: &BTreeMap<String, Vec<u8>>,
 ) -> Result<Vec<u8>, String> {
-    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    let mut total = 0u64;
-    if manifest
-        .profiles
-        .iter()
-        .map(|profile| profile.components.len())
-        .sum::<usize>()
-        + manifest.packages.len()
-        + 1
-        > MAX_ENTRIES
-    {
-        return Err("Too many backup files".into());
-    }
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
-    for profile in &mut manifest.profiles {
-        for component in &mut profile.components {
-            let payload = payloads
-                .get(&(profile.archive_profile_id.clone(), component.name.clone()))
-                .ok_or("Missing export component")?;
-            let bytes = serde_json::to_vec(payload).map_err(|e| e.to_string())?;
-            total = total
-                .checked_add(bytes.len() as u64)
-                .ok_or("Backup size overflow")?;
-            if total > MAX_BYTES as u64 {
-                return Err("Expanded backup exceeds the size limit".into());
-            }
-            if bytes.len() as u64 > MAX_FILE || payload.records.len() > MAX_RECORDS {
-                return Err("Backup component exceeds the size limit".into());
-            }
-            component.sha256 = digest(&bytes);
-            component.item_count = payload.records.len();
-            zip.start_file(&component.path, options)
-                .map_err(|e| e.to_string())?;
-            zip.write_all(&bytes).map_err(|e| e.to_string())?;
-        }
-    }
-    for package in &manifest.packages {
-        let bytes = packages
-            .get(&package.sha256)
-            .ok_or("Missing addon package file")?;
-        total = total
-            .checked_add(bytes.len() as u64)
-            .ok_or("Backup size overflow")?;
-        if total > MAX_BYTES as u64 {
-            return Err("Expanded backup exceeds the size limit".into());
-        }
-        zip.start_file(&package.path, options)
-            .map_err(|e| e.to_string())?;
-        zip.write_all(bytes).map_err(|e| e.to_string())?;
-    }
-    zip.start_file("manifest.json", options)
-        .map_err(|e| e.to_string())?;
-    zip.write_all(&serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    let bytes = zip.finish().map_err(|e| e.to_string())?.into_inner();
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+    let manifest = writer.write(manifest, payloads, packages)?;
+    let bytes = writer.finish(&manifest)?.into_inner();
     if bytes.len() > MAX_BYTES {
         return Err("Backup exceeds the size limit".into());
     }
     Ok(bytes)
+}
+
+/// Incremental archive writer. [`encode_with_packages`] is the in-memory form;
+/// an application with large files writes the same container straight to a
+/// file: components and packages first (or through [`Writer::write`]), then any
+/// [`Writer::blob`] entries, and last the manifest through [`Writer::finish`].
+pub struct Writer<W: Write + Seek> {
+    zip: zip::ZipWriter<W>,
+    total: u64,
+}
+impl<W: Write + Seek> Writer<W> {
+    pub fn new(out: W) -> Self {
+        Self {
+            zip: zip::ZipWriter::new(out),
+            total: 0,
+        }
+    }
+    fn options() -> zip::write::SimpleFileOptions {
+        zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+    }
+    fn budget(&mut self, bytes: u64) -> Result<(), String> {
+        self.total = self
+            .total
+            .checked_add(bytes)
+            .ok_or("Backup size overflow")?;
+        if self.total > MAX_BYTES as u64 {
+            return Err("Expanded backup exceeds the size limit".into());
+        }
+        Ok(())
+    }
+    /// Write every component and package a manifest lists, filling in each
+    /// component's checksum and record count. Returns the completed manifest.
+    pub fn write(
+        &mut self,
+        mut manifest: Manifest,
+        payloads: &BTreeMap<(String, String), Payload>,
+        packages: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<Manifest, String> {
+        if manifest
+            .profiles
+            .iter()
+            .map(|profile| profile.components.len())
+            .sum::<usize>()
+            + manifest.packages.len()
+            + 1
+            > MAX_ENTRIES
+        {
+            return Err("Too many backup files".into());
+        }
+        for profile in &mut manifest.profiles {
+            for component in &mut profile.components {
+                let payload = payloads
+                    .get(&(profile.archive_profile_id.clone(), component.name.clone()))
+                    .ok_or("Missing export component")?;
+                self.component(component, payload)?;
+            }
+        }
+        for package in &manifest.packages {
+            let bytes = packages
+                .get(&package.sha256)
+                .ok_or("Missing addon package file")?;
+            self.package(package, bytes)?;
+        }
+        Ok(manifest)
+    }
+    /// Write one component file and record its checksum and size.
+    pub fn component(
+        &mut self,
+        component: &mut Component,
+        payload: &Payload,
+    ) -> Result<(), String> {
+        let bytes = serde_json::to_vec(payload).map_err(|e| e.to_string())?;
+        self.budget(bytes.len() as u64)?;
+        if bytes.len() as u64 > MAX_FILE || payload.records.len() > MAX_RECORDS {
+            return Err("Backup component exceeds the size limit".into());
+        }
+        component.sha256 = digest(&bytes);
+        component.item_count = payload.records.len();
+        self.zip
+            .start_file(&component.path, Self::options())
+            .map_err(|e| e.to_string())?;
+        self.zip.write_all(&bytes).map_err(|e| e.to_string())
+    }
+    pub fn package(&mut self, package: &Package, bytes: &[u8]) -> Result<(), String> {
+        self.budget(bytes.len() as u64)?;
+        self.zip
+            .start_file(&package.path, Self::options())
+            .map_err(|e| e.to_string())?;
+        self.zip.write_all(bytes).map_err(|e| e.to_string())
+    }
+    /// Stream one opaque file under [`BLOB_PREFIX`], stored without
+    /// compression, and return its length and SHA-256. The caller records both
+    /// in a component so that [`decode_reader`]'s user can verify the bytes.
+    pub fn blob(&mut self, path: &str, source: &mut impl Read) -> Result<(u64, String), String> {
+        if !path.starts_with(BLOB_PREFIX) || !bounded::strict_path(path) {
+            return Err("Invalid backup file path".into());
+        }
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .large_file(true);
+        self.zip
+            .start_file(path, options)
+            .map_err(|e| e.to_string())?;
+        let mut hasher = Sha256::new();
+        let mut length = 0u64;
+        let mut buffer = vec![0u8; 64 * 1024];
+        loop {
+            let count = source.read(&mut buffer).map_err(|e| e.to_string())?;
+            if count == 0 {
+                break;
+            }
+            hasher.update(&buffer[..count]);
+            length += count as u64;
+            self.zip
+                .write_all(&buffer[..count])
+                .map_err(|e| e.to_string())?;
+        }
+        let sha256 = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        Ok((length, sha256))
+    }
+    /// Write `manifest.json` and close the archive, returning the output.
+    pub fn finish(mut self, manifest: &Manifest) -> Result<W, String> {
+        self.zip
+            .start_file("manifest.json", Self::options())
+            .map_err(|e| e.to_string())?;
+        self.zip
+            .write_all(&serde_json::to_vec_pretty(manifest).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        self.zip.finish().map_err(|e| e.to_string())
+    }
 }
 
 /// Decode and fully validate an archive. Duplicate, unsafe or oversized
@@ -208,16 +297,45 @@ pub fn decode(bytes: &[u8], schema: &impl Schema) -> Result<Archive, String> {
     if bytes.len() > MAX_BYTES {
         return Err("Backup exceeds the size limit".into());
     }
-    let mut zip = Zip::open(
-        Cursor::new(bytes),
-        Limits {
-            max_entries: MAX_ENTRIES,
-            max_entry_bytes: MAX_FILE,
-            max_expanded_bytes: MAX_BYTES as u64,
-        },
+    let zip = Zip::open(Cursor::new(bytes), limits(), Policy::FILES).map_err(open_error)?;
+    decode_archive(zip, schema, Some(digest(bytes)))
+}
+
+/// [`decode`] for an archive in a seekable file, which may carry large
+/// streamed entries under [`BLOB_PREFIX`] ([`Writer::blob`]). Those entries
+/// are listed and path-checked but never read here; read them with
+/// [`bounded::Archive::copy`] after opening the same file again. Everything
+/// else is held to the limits of [`decode`]. The archive's `checksum` is the
+/// digest of its manifest, which commits to every component and package.
+pub fn decode_reader<R: Read + Seek>(reader: R, schema: &impl Schema) -> Result<Archive, String> {
+    let zip = Zip::open_streaming(
+        reader,
+        limits(),
         Policy::FILES,
+        Streamed {
+            prefix: BLOB_PREFIX,
+            max_entries: MAX_BLOBS,
+        },
     )
     .map_err(open_error)?;
+    decode_archive(zip, schema, None)
+}
+
+fn limits() -> Limits {
+    Limits {
+        max_entries: MAX_ENTRIES,
+        max_entry_bytes: MAX_FILE,
+        max_expanded_bytes: MAX_BYTES as u64,
+    }
+}
+
+/// `checksum` is the whole archive's digest when the caller has it; otherwise
+/// the manifest's digest stands for the archive.
+fn decode_archive<R: Read + Seek>(
+    mut zip: Zip<R>,
+    schema: &impl Schema,
+    checksum: Option<String>,
+) -> Result<Archive, String> {
     let manifest_bytes =
         zip.read_by_name("manifest.json", MAX_FILE)
             .map_err(|error| match error {
@@ -315,7 +433,7 @@ pub fn decode(bytes: &[u8], schema: &impl Schema) -> Result<Archive, String> {
     Ok(Archive {
         manifest,
         payloads,
-        checksum: digest(bytes),
+        checksum: checksum.unwrap_or_else(|| digest(&manifest_bytes)),
         unsupported,
         undo_after: None,
         packages,
@@ -556,6 +674,91 @@ mod tests {
         assert_eq!(
             decode(&bytes, &Fixture).err().unwrap(),
             "Addon package identity mismatch"
+        );
+    }
+
+    /// Components and a manifest around streamed blobs, written like a file.
+    fn archive_with_blobs(blobs: &[(&str, &[u8])]) -> (Vec<u8>, Vec<(u64, String)>) {
+        let mut manifest = manifest(&["alpha"]);
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        manifest = writer
+            .write(manifest, &payloads(&["alpha"]), &BTreeMap::new())
+            .unwrap();
+        let written = blobs
+            .iter()
+            .map(|(path, bytes)| writer.blob(path, &mut &bytes[..]).unwrap())
+            .collect();
+        (writer.finish(&manifest).unwrap().into_inner(), written)
+    }
+
+    #[test]
+    fn blobs_stream_outside_the_size_limits_and_are_read_back_by_copy() {
+        let big = vec![0x5Au8; (MAX_FILE + 1) as usize];
+        let (bytes, written) =
+            archive_with_blobs(&[("blobs/one/big", &big), ("blobs/two", b"small")]);
+        assert_eq!(written[0], (big.len() as u64, digest(&big)));
+        assert_eq!(written[1].1, digest(b"small"));
+        // The in-memory path keeps its limits: the blob is a 32 MiB+ entry.
+        assert!(decode(&bytes, &Fixture).is_err());
+        let decoded = decode_reader(Cursor::new(&bytes[..]), &Fixture).unwrap();
+        assert_eq!(decoded.payloads.len(), 1);
+        // The checksum names the manifest, not the (possibly huge) file.
+        assert_ne!(decoded.checksum, digest(&bytes));
+        let again = decode_reader(Cursor::new(&bytes[..]), &Fixture).unwrap();
+        assert_eq!(decoded.checksum, again.checksum);
+        let mut zip = Zip::open_streaming(
+            Cursor::new(&bytes[..]),
+            limits(),
+            Policy::FILES,
+            Streamed {
+                prefix: BLOB_PREFIX,
+                max_entries: MAX_BLOBS,
+            },
+        )
+        .unwrap();
+        let mut copied = Vec::new();
+        let index = zip.find("blobs/one/big").unwrap().index;
+        zip.copy(index, u64::MAX, &mut copied).unwrap();
+        assert_eq!(digest(&copied), written[0].1);
+    }
+
+    #[test]
+    fn a_blob_archive_without_blobs_decodes_like_the_in_memory_form() {
+        let (bytes, _) = archive_with_blobs(&[]);
+        let streamed = decode_reader(Cursor::new(&bytes[..]), &Fixture).unwrap();
+        let whole = decode(&bytes, &Fixture).unwrap();
+        assert_eq!(streamed.payloads.len(), whole.payloads.len());
+        assert_eq!(streamed.manifest.archive_id, whole.manifest.archive_id);
+        assert_eq!(whole.checksum, digest(&bytes));
+    }
+
+    #[test]
+    fn blob_paths_must_stay_under_the_prefix_and_ordinary_entries_stay_bounded() {
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        for path in [
+            "manifest.json",
+            "blobs/../x",
+            "blobs//x",
+            "/blobs/x",
+            "other/x",
+        ] {
+            assert!(writer.blob(path, &mut &b"x"[..]).is_err(), "{path}");
+        }
+        // An entry outside the prefix cannot hide behind the streamed rules.
+        let mut raw = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        raw.start_file("profiles/p1/huge.bin", options).unwrap();
+        raw.write_all(&vec![1u8; (MAX_FILE + 1) as usize]).unwrap();
+        raw.start_file("manifest.json", options).unwrap();
+        raw.write_all(&serde_json::to_vec(&manifest(&[])).unwrap())
+            .unwrap();
+        let bytes = raw.finish().unwrap().into_inner();
+        assert_eq!(
+            decode_reader(Cursor::new(&bytes[..]), &Fixture)
+                .err()
+                .unwrap(),
+            "Expanded backup exceeds the size limit"
         );
     }
 

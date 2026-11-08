@@ -12,7 +12,7 @@
 //! declared and actual size of each entry, and the total expanded size.
 use ::zip::ZipArchive;
 use std::collections::HashSet;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 
 const CENTRAL_SIGNATURE: &[u8; 4] = b"PK\x01\x02";
 const CENTRAL_HEADER: u64 = 46;
@@ -37,6 +37,20 @@ pub struct Limits {
     pub max_entry_bytes: u64,
     /// Largest sum of declared sizes, and of bytes read over the archive's life.
     pub max_expanded_bytes: u64,
+}
+
+/// Entries under a name prefix whose content is streamed rather than buffered
+/// (downloaded chapter pages in a backup, for example). They count toward the
+/// record limit but not toward [`Limits::max_entry_bytes`] or
+/// [`Limits::max_expanded_bytes`], so an archive of a few large files and one
+/// of many small ones can share the same limits for everything else. Read them
+/// with [`Archive::copy`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Streamed {
+    /// Entry names that start with this prefix are streamed.
+    pub prefix: &'static str,
+    /// Most streamed records accepted, in addition to [`Limits::max_entries`].
+    pub max_entries: usize,
 }
 
 /// How an entry's name is judged safe.
@@ -153,13 +167,34 @@ pub struct Archive<R> {
 }
 
 impl<R: Read + Seek> Archive<R> {
-    pub fn open(mut reader: R, limits: Limits, policy: Policy) -> Result<Self, Error> {
+    pub fn open(reader: R, limits: Limits, policy: Policy) -> Result<Self, Error> {
+        Self::open_inner(reader, limits, policy, None)
+    }
+
+    /// [`Archive::open`] for an archive that also carries [`Streamed`] entries.
+    pub fn open_streaming(
+        reader: R,
+        limits: Limits,
+        policy: Policy,
+        streamed: Streamed,
+    ) -> Result<Self, Error> {
+        Self::open_inner(reader, limits, policy, Some(streamed))
+    }
+
+    fn open_inner(
+        mut reader: R,
+        limits: Limits,
+        policy: Policy,
+        streamed: Option<Streamed>,
+    ) -> Result<Self, Error> {
+        let capacity = limits
+            .max_entries
+            .saturating_add(streamed.map_or(0, |streamed| streamed.max_entries));
         let length = reader.seek(SeekFrom::End(0))?;
         // Bound the work the zip crate will do before it parses anything.
         if let Some(end) = read_end_record(&mut reader, length)?
-            && (end.records > limits.max_entries as u64
-                || end.size
-                    > (limits.max_entries as u64).saturating_mul(DIRECTORY_BYTES_PER_RECORD))
+            && (end.records > capacity as u64
+                || end.size > (capacity as u64).saturating_mul(DIRECTORY_BYTES_PER_RECORD))
         {
             return Err(Error::TooManyEntries);
         }
@@ -168,7 +203,7 @@ impl<R: Read + Seek> Archive<R> {
         let start = zip.central_directory_start();
         let listed = zip.len();
         let mut reader = zip.into_inner();
-        let records = count_records(&mut reader, start, length, limits.max_entries)?;
+        let records = count_records(&mut reader, start, length, capacity)?;
         if records != listed {
             return Err(Error::DuplicateEntry);
         }
@@ -177,6 +212,7 @@ impl<R: Read + Seek> Archive<R> {
         let mut entries = Vec::with_capacity(zip.len());
         let mut names = HashSet::with_capacity(zip.len());
         let mut declared = 0u64;
+        let (mut ordinary, mut streamed_records) = (0usize, 0usize);
         for index in 0..zip.len() {
             let file = zip.by_index_raw(index)?;
             if file.encrypted() {
@@ -211,12 +247,17 @@ impl<R: Read + Seek> Archive<R> {
                 return Err(Error::DuplicateEntry);
             }
             let size = file.size();
-            if size > limits.max_entry_bytes {
-                return Err(Error::EntryTooLarge);
-            }
-            declared = declared.checked_add(size).ok_or(Error::ExpandedTooLarge)?;
-            if declared > limits.max_expanded_bytes {
-                return Err(Error::ExpandedTooLarge);
+            if streamed.is_some_and(|streamed| name.starts_with(streamed.prefix)) {
+                streamed_records += 1;
+            } else {
+                ordinary += 1;
+                if size > limits.max_entry_bytes {
+                    return Err(Error::EntryTooLarge);
+                }
+                declared = declared.checked_add(size).ok_or(Error::ExpandedTooLarge)?;
+                if declared > limits.max_expanded_bytes {
+                    return Err(Error::ExpandedTooLarge);
+                }
             }
             entries.push(Entry {
                 index,
@@ -224,6 +265,11 @@ impl<R: Read + Seek> Archive<R> {
                 size,
                 is_dir,
             });
+        }
+        if ordinary > limits.max_entries
+            || streamed.is_some_and(|streamed| streamed_records > streamed.max_entries)
+        {
+            return Err(Error::TooManyEntries);
         }
         Ok(Self {
             zip,
@@ -275,6 +321,36 @@ impl<R: Read + Seek> Archive<R> {
     pub fn read_by_name(&mut self, name: &str, max_bytes: u64) -> Result<Vec<u8>, Error> {
         let index = self.find(name).ok_or(Error::Missing)?.index;
         self.read(index, max_bytes)
+    }
+
+    /// Stream one entry into `out` without buffering it. `max_bytes` is the
+    /// caller's cap for this entry. The content must match the declared size,
+    /// and the `zip` crate verifies its CRC when the entry ends. Bytes copied
+    /// here do not count toward [`Limits::max_expanded_bytes`]: that budget is
+    /// for entries a caller holds in memory.
+    pub fn copy(
+        &mut self,
+        index: usize,
+        max_bytes: u64,
+        out: &mut impl Write,
+    ) -> Result<u64, Error> {
+        let entry = self.entries.get(index).ok_or(Error::Missing)?;
+        if entry.is_dir {
+            return Err(Error::Directory);
+        }
+        let declared = entry.size;
+        if declared > max_bytes {
+            return Err(Error::EntryTooLarge);
+        }
+        let mut file = self.zip.by_index(index)?;
+        let copied = io::copy(&mut file.by_ref().take(max_bytes.saturating_add(1)), out)?;
+        if copied > max_bytes {
+            return Err(Error::EntryTooLarge);
+        }
+        if copied != declared {
+            return Err(Error::SizeMismatch);
+        }
+        Ok(copied)
     }
 }
 
@@ -557,6 +633,78 @@ mod tests {
         forged.extend_from_slice(first_record);
         forged.extend_from_slice(&bytes[end..]);
         assert!(open(&forged, Policy::FILES).is_err());
+    }
+
+    #[test]
+    fn streamed_entries_skip_the_byte_limits_but_not_the_record_or_path_rules() {
+        let streamed = Streamed {
+            prefix: "blobs/",
+            max_entries: 3,
+        };
+        let open = |bytes: &[u8]| {
+            Archive::open_streaming(Cursor::new(bytes.to_vec()), LIMITS, Policy::FILES, streamed)
+        };
+        let big = vec![9u8; 5000];
+        // Over the 1024 byte entry limit and the 4096 total, yet streamed.
+        let bytes = build(&[("a.json", b"{}"), ("blobs/one", &big), ("blobs/two", &big)]);
+        assert!(matches!(
+            open_plain(&bytes),
+            Err(Error::EntryTooLarge | Error::ExpandedTooLarge)
+        ));
+        let mut archive = open(&bytes).unwrap();
+        assert_eq!(archive.entries().len(), 3);
+        let mut copied = Vec::new();
+        let index = archive.find("blobs/two").unwrap().index;
+        assert_eq!(archive.copy(index, 5000, &mut copied).unwrap(), 5000);
+        assert_eq!(copied, big);
+        // The caller's own cap still applies, and nothing is written past it.
+        let mut capped = Vec::new();
+        assert!(matches!(
+            archive.copy(index, 4999, &mut capped),
+            Err(Error::EntryTooLarge)
+        ));
+        assert!(capped.is_empty());
+        // An ordinary entry beside the streamed ones is still bounded.
+        let bytes = build(&[("a.json", &big), ("blobs/one", b"x")]);
+        assert!(matches!(open(&bytes), Err(Error::EntryTooLarge)));
+        // More streamed records than allowed, and more ordinary ones.
+        let many: Vec<String> = (0..4).map(|i| format!("blobs/{i}")).collect();
+        let files: Vec<(&str, &[u8])> = many.iter().map(|n| (n.as_str(), &b"x"[..])).collect();
+        assert!(matches!(open(&build(&files)), Err(Error::TooManyEntries)));
+        let ordinary: Vec<String> = (0..17).map(|i| format!("{i:02}.json")).collect();
+        let files: Vec<(&str, &[u8])> = ordinary.iter().map(|n| (n.as_str(), &b"x"[..])).collect();
+        assert!(matches!(open(&build(&files)), Err(Error::TooManyEntries)));
+        // Streaming does not relax the name rules.
+        let bytes = build(&[("blobs/../escape", b"x")]);
+        assert!(matches!(open(&bytes), Err(Error::UnsafePath)));
+    }
+
+    fn open_plain(bytes: &[u8]) -> Result<Archive<Cursor<Vec<u8>>>, Error> {
+        Archive::open(Cursor::new(bytes.to_vec()), LIMITS, Policy::FILES)
+    }
+
+    #[test]
+    fn copy_refuses_a_body_that_disagrees_with_its_directory_entry() {
+        let mut zip = ::zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let stored = ::zip::write::SimpleFileOptions::default()
+            .compression_method(::zip::CompressionMethod::Stored);
+        zip.start_file("a", stored).unwrap();
+        zip.write_all(b"abcdef").unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        let mut archive = open(&bytes, Policy::FILES).unwrap();
+        let mut sink = Vec::new();
+        assert_eq!(archive.copy(0, 100, &mut sink).unwrap(), 6);
+        assert_eq!(sink, b"abcdef");
+        // Stored bytes edited in place fail the CRC check at the end of the entry.
+        let mut tampered = bytes.clone();
+        let at = tampered.windows(6).position(|w| w == b"abcdef").unwrap();
+        tampered[at] ^= 0xFF;
+        let mut archive = open(&tampered, Policy::FILES).unwrap();
+        assert!(archive.copy(0, 100, &mut Vec::new()).is_err());
+        assert!(matches!(
+            archive.copy(5, 100, &mut Vec::new()),
+            Err(Error::Missing)
+        ));
     }
 
     #[test]

@@ -140,7 +140,9 @@ temporary name use `atomic_write_via`.
 and a `Policy`. The `zip` crate folds duplicate central-directory records into
 one name, so the reader walks the raw directory itself and refuses an archive
 whose records disagree with the crate's view, before handing out any entry.
-Addon packages, backups and comic imports all go through it.
+Addon packages, backups and comic imports all go through it. `Archive::open_streaming`
+and `Archive::copy` add entries under a name prefix that are streamed instead of
+buffered and are exempt from the byte limits (still counted and path-checked).
 
 `nova-net` keeps the three transport rules the apps used to copy: `is_public_ip`,
 `tls::client_config` (feature `rustls`, Android only: bundled Mozilla roots and
@@ -166,7 +168,11 @@ of a deletion and the user-facing messages.
 
 `nova-backup` owns the backup container and its limits. Applications implement
 `archive::Schema` (known components, payload validation, package validation);
-applying and undoing a restore stay with each application.
+applying and undoing a restore stay with each application. For an application
+whose archive carries large files, `archive::Writer` writes the same container
+incrementally and `archive::decode_reader` reads it from a seekable file; opaque
+entries under `blobs/` are stored uncompressed and streamed, and the
+application's own components declare and verify them.
 
 ## Android glue
 
