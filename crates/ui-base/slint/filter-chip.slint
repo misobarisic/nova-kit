@@ -3,6 +3,15 @@ import { FeedbackProgress } from "feedback-motion.slint";
 
 export component LibraryFilterChip inherits Rectangle {
     in property <string> label;
+    // Opt-in quieter look: a faint wash and hairline border when unselected,
+    // selection fill with an accent edge when selected. Default chips are
+    // unchanged.
+    in property <bool> tonal: false;
+    // Shown after the label when not empty, e.g. "Reading 8"; part of the
+    // chip's width so selection never moves neighbouring chips.
+    in property <string> count: "";
+    // Visible height. Below 44px the touch and focus areas still span 44px.
+    in property <length> chip-height: InterfaceStyle.tv ? 56px : 40px;
     in property <bool> selected;
     in property <bool> focused: false;
     in property <bool> touch_feedback: false;
@@ -22,56 +31,87 @@ export component LibraryFilterChip inherits Rectangle {
     changed selected => { if (root.selected) { root.reveal(root.x, root.width); } }
     changed x => { if (root.selected) { root.reveal(root.x, root.width); } }
     changed width => { if (root.selected) { root.reveal(root.x, root.width); } }
-    height: InterfaceStyle.tv ? 56px : 40px;
+    height: root.chip-height;
     // Selection changes weight, but must not shift adjacent pills or their rail.
-    width: chip_measure.preferred-width + 28px;
+    width: chip_measure.preferred-width + (root.count != "" ? 6px + count_measure.preferred-width : 0px) + 28px;
+    // Only the opt-in look extends its hit area; default chips are unchanged.
+    private property <length> touch-height: root.tonal ? max(root.height, 44px) : root.height;
     border-radius: Math.min(Theme.button_corner_radius, Math.min(self.width, self.height) / 2);
     private property <bool> focus-visible: root.focused || chip_focus.has-focus;
     border-width: root.focus-visible ? 2px : 1px;
-    border-color: root.focus-visible ? Theme.current.focus_ring : Theme.current.border_strong;
+    border-color: root.focus-visible ? Theme.current.focus_ring : root.tonal ? Theme.current.border_subtle : Theme.current.border_strong;
     // Android keeps the touch pointer over the last tapped item after Up.
     // Pressed clears on release/cancel; desktop still has real hover.
     selection := FeedbackProgress { active: root.selected; }
     hover := FeedbackProgress { active: root.touch_feedback ? chip_touch.pressed : chip_touch.has-hover; motion: Anim.enabled && Anim.hover; duration: Anim.hover_fast; }
-    background: Theme.current.control_hover.mix(Theme.current.hero_control, hover.value);
+    background: root.tonal ? Theme.current.control_hover.mix(Theme.current.hover_subtle, hover.value)
+        : Theme.current.control_hover.mix(Theme.current.hero_control, hover.value);
     selection_fill := Rectangle {
         width: 100%; height: 100%; border-radius: root.border-radius;
-        background: Theme.current.primary_button;
+        background: root.tonal ? Theme.current.selection_fill : Theme.current.primary_button;
         border-width: root.border-width;
-        border-color: root.focus-visible ? Theme.current.focus_ring : Theme.current.accent;
+        border-color: root.focus-visible ? Theme.current.focus_ring : root.tonal ? Theme.current.focus_soft : Theme.current.accent;
         opacity: selection.value;
     }
     accessible-role: button;
-    accessible-label: root.label;
+    accessible-label: root.count != "" ? @tr("{0}, {1} titles", root.label, root.count) : root.label;
     chip_measure := Text {
         visible: false;
         text: root.label; font-size: InterfaceStyle.tv ? 20px : 13px; font-weight: 600;
     }
+    count_measure := Text {
+        visible: false;
+        text: root.count; font-size: InterfaceStyle.tv ? 16px : 11px; font-weight: 600;
+    }
+    // Without a count the label stays centred, exactly as before. With one,
+    // the label starts at the padding and the count follows it.
     chip_text := Text {
-        width: 100%; height: 100%;
+        x: root.count != "" ? 14px : 0px;
+        width: root.count != "" ? chip_measure.preferred-width : root.width;
+        height: 100%;
         text: root.label;
         color: Theme.current.text_secondary;
         opacity: 1 - selection.value;
         accessible-role: none;
         font-size: InterfaceStyle.tv ? 20px : 13px;
-        font-weight: 400;
-        horizontal-alignment: center;
+        font-weight: root.tonal ? 600 : 400;
+        horizontal-alignment: root.count != "" ? left : center;
         vertical-alignment: center;
     }
     chip_selected_text := Text {
-        width: 100%; height: 100%;
+        x: chip_text.x; width: chip_text.width;
+        height: 100%;
         text: root.label;
-        color: Theme.current.on_accent;
+        color: root.tonal ? Theme.current.text_selected : Theme.current.on_accent;
         opacity: selection.value;
         accessible-role: none;
         font-size: InterfaceStyle.tv ? 20px : 13px;
         font-weight: 600;
-        horizontal-alignment: center;
+        horizontal-alignment: chip_text.horizontal-alignment;
+        vertical-alignment: center;
+    }
+    if root.count != "": Text {
+        x: 14px + chip_measure.preferred-width + 6px; width: count_measure.preferred-width; height: 100%;
+        text: root.count;
+        color: Theme.current.text_hint;
+        opacity: 1 - selection.value;
+        accessible-role: none;
+        font-size: InterfaceStyle.tv ? 16px : 11px; font-weight: 600;
+        vertical-alignment: center;
+    }
+    if root.count != "": Text {
+        x: 14px + chip_measure.preferred-width + 6px; width: count_measure.preferred-width; height: 100%;
+        text: root.count;
+        color: root.tonal ? Theme.current.text_selected.with-alpha(0.7) : Theme.current.on_accent.with-alpha(0.7);
+        opacity: selection.value;
+        accessible-role: none;
+        font-size: InterfaceStyle.tv ? 16px : 11px; font-weight: 600;
         vertical-alignment: center;
     }
     // Library owns keyboard navigation; standalone filter rows can opt into
     // native focus without replacing the page's persistent navigation scope.
     chip_focus := FocusScope {
+        y: (root.height - root.touch-height) / 2; height: root.touch-height;
         enabled: root.keyboard-focusable;
         key-pressed(e) => {
             if root.arrow-navigation && (e.text == Key.LeftArrow || e.text == Key.RightArrow) {
@@ -84,6 +124,7 @@ export component LibraryFilterChip inherits Rectangle {
         }
     }
     chip_touch := TouchArea {
+        y: (root.height - root.touch-height) / 2; height: root.touch-height;
         mouse-cursor: pointer;
         clicked => { if (root.keyboard-focusable) { chip_focus.focus(); } root.picked(); }
     }
