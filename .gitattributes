@@ -1,0 +1,3 @@
+# Templates render byte-identical sources in the apps; keep them LF on every
+# checkout, including Windows with core.autocrlf.
+*.java.in text eol=lf
