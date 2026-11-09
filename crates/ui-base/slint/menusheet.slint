@@ -4,7 +4,9 @@ import { ScrollView } from "scrollview.slint";
 
 
 
-// Bottom-sheet action menu replacing native context menus on cards.
+// Popup-style action menu replacing native context menus on cards: a centered
+// panel in the surface of the title, chapter and page menus (scale-and-fade
+// entrance, whole-row selection). Formerly a bottom sheet.
 //
 // Why not ContextMenuArea: its presses are consumed by overlapping card
 // TouchAreas (upstream slint#12354), its hold timers can't be coordinated
@@ -15,7 +17,7 @@ import { ScrollView } from "scrollview.slint";
 // the actions. Same component serves mouse right-click, touch hold and
 // keyboard flows — the caller opens it explicitly.
 //
-// Sizing: the panel is fully arithmetic (title + N*48px rows + Cancel),
+// Sizing: the panel is fully arithmetic (header + N rows + Cancel),
 // capped at ~85% of the viewport with the action list scrolling inside,
 // and lifted by `safe-bottom` so Cancel clears the Android system bar.
 // Short sheets render exactly; tall/landscape sheets cap and scroll.
@@ -25,7 +27,15 @@ export component MenuSheet inherits Rectangle {
     in property <bool> open: false;
     in property <bool> keyboard_navigation: InterfaceStyle.tv;
     in property <string> sheet_title: "";
+    // Optional muted line under the title (e.g. the title's current status).
+    in property <string> sheet_subtitle: "";
     in property <[SheetItem]> items: [];
+    // Optional per-row leading icons: SVG path commands on a 24×24 viewbox,
+    // stroked like the Reader title menu. Rows without one keep text only.
+    in property <[string]> item_icons: [];
+    // Optional per-row tone: 1 draws the row destructive, with a divider
+    // above it so it reads as a separate group.
+    in property <[int]> item_tones: [];
     // Opt in to a single-choice menu. Action sheets keep their existing rows.
     in property <int> selected_index: -1;
     // Bottom system-bar inset (Android gesture/nav bar), bound by the
@@ -42,6 +52,14 @@ export component MenuSheet inherits Rectangle {
     // stays one-way.
     in property <length> max_h: 600px;
 
+    // Pointer-anchored mode (a desktop right-click): the panel opens at the
+    // pointer, kept inside the window, and grows from it instead of from the
+    // centre. Coordinates are window coordinates. Touch holds and keyboard
+    // opens leave this off and keep the centred popup.
+    in property <bool> anchored: false;
+    in property <length> anchor_x: 0px;
+    in property <length> anchor_y: 0px;
+
     callback picked(int);
     callback closed();
 
@@ -53,13 +71,18 @@ export component MenuSheet inherits Rectangle {
     private property <bool> retained: false;
     private property <bool> revealed: false;
     private property <bool> motion_enabled: Anim.enabled && Anim.transitions;
+    private property <float> reveal_progress: root.revealed ? 1 : 0;
+    animate reveal_progress { duration: Anim.transition_slide; easing: ease-out; }
 
     function update_open() {
         enter_t.stop();
         exit_t.stop();
         if (root.open) {
             root.retained = true;
-            if root.keyboard_navigation { root.tv-index = root.items.length; menu_scope.focus(); }
+            if root.keyboard_navigation {
+                root.tv-index = root.cancel_shown ? root.items.length : Math.max(0, root.selected_index);
+                menu_scope.focus();
+            }
             if (root.motion_enabled) {
                 // Defer the first target until the hidden baseline is painted.
                 enter_t.start();
@@ -101,18 +124,24 @@ export component MenuSheet inherits Rectangle {
     // TV remotes own the sheet until an action or Back closes it. Cancel is
     // the safe initial selection; disabled actions can never be invoked.
     property <int> tv-index: 0;
+    // A pointer-anchored menu is a context menu: no Cancel row.
+    property <bool> cancel_shown: !root.anchored;
+    property <int> last_index: root.cancel_shown ? root.items.length : root.items.length - 1;
+    property <bool> has_icons: root.item_icons.length > 0;
+    property <length> row_h: InterfaceStyle.tv ? 64px : 44px;
+    property <length> row_gap: InterfaceStyle.tv ? 4px : 2px;
     menu_scope := FocusScope {
         enabled: root.keyboard_navigation && root.open;
         key-pressed(e) => {
             if !root.keyboard_navigation || !root.open { reject }
             else if e.text == Key.UpArrow || e.text == Key.DownArrow || e.text == Key.Tab {
                 SettingsStyle.keyboard-mode = true;
-                root.tv-index = Math.clamp(root.tv-index + (e.text == Key.UpArrow || (e.text == Key.Tab && e.modifiers.shift) ? -1 : 1), 0, root.items.length);
-                menu_scroll.content-y = -Math.max(0px, (root.tv-index + 1) * (InterfaceStyle.tv ? 68px : 52px) - menu_scroll.visible-height);
+                root.tv-index = Math.clamp(root.tv-index + (e.text == Key.UpArrow || (e.text == Key.Tab && e.modifiers.shift) ? -1 : 1), 0, Math.max(0, root.last_index));
+                menu_scroll.content-y = -Math.max(0px, (root.tv-index + 1) * (root.row_h + root.row_gap) - menu_scroll.visible-height);
                 accept
             } else if e.text == Key.Return || e.text == " " {
                 if !e.repeat {
-                    if root.tv-index == root.items.length { root.closed(); }
+                    if root.tv-index >= root.items.length { root.closed(); }
                     else if root.items[root.tv-index].enabled { root.picked(root.tv-index); }
                 }
                 accept
@@ -125,16 +154,24 @@ export component MenuSheet inherits Rectangle {
     // Chrome around the scrolling list: padding + gaps + optional title
     // + Cancel. Kept explicit (not measured) so the cap math below is
     // exact and short sheets never reserve empty space.
-    property <length> chrome_h: 24px + (root.sheet_title == "" ? 0px : InterfaceStyle.tv ? 36px : 28px) + (InterfaceStyle.tv ? 64px : 48px);
+    property <length> header_h: (root.sheet_title == "" ? 0px : InterfaceStyle.tv ? 34px : 26px)
+        + (root.sheet_subtitle == "" ? 0px : InterfaceStyle.tv ? 26px : 18px);
+    property <length> chrome_h: 12px + (root.header_h > 0 ? root.header_h + 13px : 0px)
+        + (root.cancel_shown ? root.row_h + 9px : 0px);
+    property <length> panel_w: Math.min(InterfaceStyle.tv ? 720px : root.anchored ? 288px : 340px, root.width - root.safe-left - root.safe-right - 32px);
+    property <length> panel_h: root.chrome_h + root.list_h;
+    property <length> pos_x: Math.clamp(root.anchor_x - root.absolute-position.x, 12px + root.safe-left, Math.max(12px + root.safe-left, root.width - root.safe-right - root.panel_w - 12px));
+    property <length> pos_y: Math.clamp(root.anchor_y - root.absolute-position.y, 12px, Math.max(12px, root.height - root.safe-bottom - root.panel_h - 12px));
     // Visible list height: everything when it fits, floored at 0.
-    property <length> list_h: Math.max(0px, Math.min(root.items.length * (InterfaceStyle.tv ? 68px : 52px) - 4px, root.max_h - root.chrome_h - root.safe-bottom));
+    property <length> list_h: Math.max(0px, Math.min(root.items.length * (root.row_h + root.row_gap) - root.row_gap, root.max_h - root.chrome_h - root.safe-bottom));
 
     // Dim backdrop: covers the page, eats outside taps (close only).
     Rectangle {
         width: 100%;
         height: 100%;
         background: Theme.current.scrim_shadow;
-        opacity: root.revealed ? 1.0 : 0.0;
+        // An anchored menu is a plain popup: no dimming behind it.
+        opacity: root.anchored ? 0.0 : root.revealed ? 1.0 : 0.0;
         animate opacity { duration: Anim.transition_fade; easing: ease-out; }
     }
 
@@ -146,45 +183,75 @@ export component MenuSheet inherits Rectangle {
         clicked => { if (root.open) { root.closed(); } }
     }
 
-    // Bottom-anchored panel (large touch targets, thumb-friendly),
-    // centered with side margins and capped width on wide screens.
+    // Centered panel with side margins and a capped width on wide screens.
     VerticalLayout {
         width: 100%;
         height: 100%;
-        y: root.revealed ? 0px : root.chrome_h + root.list_h + root.safe-bottom;
-        animate y { duration: Anim.transition_slide; easing: ease-out; }
-        alignment: end;
+        padding-bottom: root.anchored ? 0px : root.safe-bottom;
+        padding-top: root.anchored ? root.pos_y : 0px;
+        alignment: root.anchored ? start : center;
 
         HorizontalLayout {
             width: 100%;
-            alignment: center;
-            padding-left: root.safe-left;
-            padding-right: root.safe-right;
+            alignment: root.anchored ? start : center;
+            padding-left: root.anchored ? root.pos_x : root.safe-left;
+            padding-right: root.anchored ? 0px : root.safe-right;
 
             panel := Rectangle {
-                width: Math.min(InterfaceStyle.tv ? 720px : 560px, parent.width - root.safe-left - root.safe-right - 24px);
-                height: root.chrome_h + root.list_h + root.safe-bottom;
+                width: root.panel_w;
+                height: root.panel_h;
                 background: Theme.current.popup;
-                border-radius: 16px;
+                border-radius: 14px;
+                border-width: 1px;
+                border-color: Theme.current.border_soft;
+                drop-shadow-offset-y: 8px;
+                drop-shadow-blur: 24px;
+                drop-shadow-color: #00000070;
                 clip: true;
+                opacity: root.reveal_progress;
+                transform-scale: 0.86 + 0.14 * root.reveal_progress;
+                transform-origin: root.anchored
+                    ? { x: Math.clamp(root.anchor_x - root.absolute-position.x - root.pos_x, 0px, root.panel_w), y: Math.clamp(root.anchor_y - root.absolute-position.y - root.pos_y, 0px, root.panel_h) }
+                    : { x: root.panel_w / 2, y: root.panel_h / 2 };
 
                 VerticalLayout {
                     width: 100%;
                     height: 100%;
-                    padding: 8px;
-                    spacing: 4px;
-                    // Pack from the top: title, items, Cancel in order.
+                    padding: 6px;
+                    spacing: 0px;
+                    // Pack from the top: header, items, Cancel in order.
                     // Any slack (rounding, overshoot) pools below Cancel
                     // inside the bottom lift — never between the title
                     // and the first item.
                     alignment: start;
 
-                    if root.sheet_title != "": Text {
-                        text: root.sheet_title;
-                        color: Theme.current.text_muted;
-                        font-size: InterfaceStyle.tv ? 18px : 12px;
-                        font-weight: 600;
-                        horizontal-alignment: center;
+                    // Header: the title in bold with an optional muted
+                    // summary, as in the Reader title menu.
+                    if root.header_h > 0: VerticalLayout {
+                        height: root.header_h;
+                        padding-left: 10px; padding-right: 10px;
+                        alignment: center;
+                        if root.sheet_title != "": Text {
+                            text: root.sheet_title;
+                            color: Theme.current.text_bright;
+                            font-size: InterfaceStyle.tv ? 20px : 14px;
+                            font-weight: 600;
+                            horizontal-alignment: left;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        if root.sheet_subtitle != "": Text {
+                            text: root.sheet_subtitle;
+                            color: Theme.current.text_muted;
+                            font-size: InterfaceStyle.tv ? 16px : 12px;
+                            horizontal-alignment: left;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                    if root.header_h > 0: Rectangle {
+                        height: 13px;
+                        Rectangle { x: 4px; y: 6px; width: parent.width - 8px; height: 1px; background: Theme.current.border_soft; }
                     }
 
                     menu_scroll := ScrollView {
@@ -197,9 +264,10 @@ export component MenuSheet inherits Rectangle {
 
                         VerticalLayout {
                             width: 100%;
-                            spacing: 4px;
+                            spacing: root.row_gap;
 
                             for it[i] in root.items: menu_row := Rectangle {
+                                property <bool> danger: root.item_tones[i] == 1;
                                 property <bool> state-motion: Anim.enabled;
                                 property <float> selected-target: root.selected_index == i ? 1 : 0;
                                 property <float> animated-selection: self.selected-target;
@@ -217,8 +285,8 @@ export component MenuSheet inherits Rectangle {
                                         self.animated-ring = self.ring-target;
                                     }
                                 }
-                                height: InterfaceStyle.tv ? 64px : 48px;
-                                border-radius: 8px;
+                                height: root.row_h;
+                                border-radius: 10px;
                                 border-width: root.keyboard_navigation && (InterfaceStyle.tv || SettingsStyle.keyboard-mode) && root.tv-index == i ? 2px : 0px;
                                 border-color: Theme.current.focus_ring;
                                 background: btn_touch.has-hover ? Theme.current.control_hover : transparent;
@@ -228,7 +296,7 @@ export component MenuSheet inherits Rectangle {
                                 if root.selected_index >= 0: Rectangle {
                                     x: 2px; y: 2px;
                                     width: parent.width - 4px; height: parent.height - 4px;
-                                    border-radius: 6px;
+                                    border-radius: 8px;
                                     background: Theme.current.settings_selected_wash;
                                     opacity: Anim.enabled ? menu_row.animated-selection : menu_row.selected-target;
                                 }
@@ -252,32 +320,44 @@ export component MenuSheet inherits Rectangle {
                                     accessible-checked: root.selected_index == i;
                                 }
 
+                                // The current choice: an accent edge on the tinted row.
                                 if root.selected_index >= 0: Rectangle {
-                                    x: 16px;
-                                    y: (parent.height - self.height) / 2;
-                                    width: InterfaceStyle.tv ? 22px : 18px;
-                                    height: self.width;
-                                    border-radius: self.width / 2;
-                                    border-width: 2px;
-                                    border-color: Anim.enabled ? menu_row.animated-ring : menu_row.ring-target;
-                                    Rectangle {
-                                        width: parent.width / 2;
-                                        height: self.width;
-                                        x: (parent.width - self.width) / 2;
-                                        y: (parent.height - self.height) / 2;
-                                        border-radius: self.width / 2;
-                                        background: Theme.current.accent;
-                                        opacity: Anim.enabled ? menu_row.animated-selection : menu_row.selected-target;
-                                    }
+                                    x: 0px; y: 10px;
+                                    width: 3px; height: parent.height - 20px;
+                                    border-radius: 2px;
+                                    background: Theme.current.accent_soft;
+                                    opacity: Anim.enabled ? menu_row.animated-selection : menu_row.selected-target;
+                                }
+
+                                // A destructive row starts its own group.
+                                if menu_row.danger && i > 0: Rectangle {
+                                    x: 4px; y: -root.row_gap / 2 - 0.5px;
+                                    width: parent.width - 8px; height: 1px;
+                                    background: Theme.current.border_soft;
+                                }
+
+                                if root.has_icons && root.item_icons[i] != "": Path {
+                                    x: 12px; y: (parent.height - self.height) / 2;
+                                    width: InterfaceStyle.tv ? 26px : 20px; height: self.width;
+                                    viewbox-width: 24; viewbox-height: 24;
+                                    fill: transparent; stroke-width: 1.8px;
+                                    stroke: !it.enabled ? Theme.current.text_disabled
+                                        : menu_row.danger ? Theme.current.text_destructive
+                                        : root.selected_index == i ? Theme.current.accent_soft : Theme.current.text_secondary;
+                                    commands: root.item_icons[i];
+                                    accessible-role: none;
                                 }
 
                                 Text {
-                                    x: root.selected_index >= 0 ? 48px : 0px;
-                                    width: parent.width - self.x - (root.selected_index >= 0 ? 16px : 0px);
+                                    x: root.has_icons ? (InterfaceStyle.tv ? 52px : 44px) : 14px;
+                                    width: parent.width - self.x - 14px;
                                     text: it.label;
-                                    color: it.enabled ? Theme.current.text_primary : Theme.current.text_disabled;
-                                    font-size: InterfaceStyle.tv ? 22px : 15px;
-                                    horizontal-alignment: center;
+                                    color: !it.enabled ? Theme.current.text_disabled
+                                        : menu_row.danger ? Theme.current.text_destructive
+                                        : root.selected_index == i ? Theme.current.accent_soft : Theme.current.text_bright;
+                                    font-weight: root.selected_index == i ? 600 : 400;
+                                    font-size: InterfaceStyle.tv ? 22px : 14px;
+                                    horizontal-alignment: left;
                                     vertical-alignment: center;
                                     overflow: elide;
                                 }
@@ -291,23 +371,29 @@ export component MenuSheet inherits Rectangle {
                         }
                     }
 
-                    Rectangle {
-                        height: InterfaceStyle.tv ? 64px : 48px;
+                    if root.cancel_shown: Rectangle {
+                        height: 9px;
+                        Rectangle { x: 4px; y: 4px; width: parent.width - 8px; height: 1px; background: Theme.current.border_soft; }
+                    }
+                    if root.cancel_shown: Rectangle {
+                        height: root.row_h;
                         vertical-stretch: 0;
                         // Assistive technology activates Cancel like the touch area below.
                         accessible-role: button;
                         accessible-label: @tr("Cancel");
                         accessible-action-default => { if root.open { root.closed(); } }
-                        border-radius: 8px;
+                        border-radius: 10px;
                         border-width: root.keyboard_navigation && (InterfaceStyle.tv || SettingsStyle.keyboard-mode) && root.tv-index == root.items.length ? 2px : 0px;
                         border-color: Theme.current.focus_ring;
                         background: cancel_touch.has-hover ? Theme.current.control_hover : transparent;
 
                         Text {
+                            x: 14px;
+                            width: parent.width - 28px;
                             text: @tr("Cancel");
-                            color: Theme.current.accent;
-                            font-size: InterfaceStyle.tv ? 22px : 15px;
-                            font-weight: 700;
+                            color: Theme.current.text_secondary;
+                            font-size: InterfaceStyle.tv ? 22px : 14px;
+                            font-weight: 600;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
