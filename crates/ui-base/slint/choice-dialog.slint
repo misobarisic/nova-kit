@@ -6,6 +6,7 @@
 // `open`; the dialog animates in and out as it changes.
 import { Theme, SettingsStyle, Anim } from "@NovaUiShared";
 import { MenuItem } from "menu-item.slint";
+import { ScrollView } from "scrollview.slint";
 
 export component ChoiceDialog inherits Rectangle {
     in property <bool> open;
@@ -20,14 +21,15 @@ export component ChoiceDialog inherits Rectangle {
     private property <bool> motion: Anim.enabled && Anim.player;
     private property <float> progress: root.open ? 1 : 0;
     animate progress { duration: root.motion ? (root.open ? Anim.player_slide : Anim.player_fast) : 0ms; easing: ease-out; }
-    private property <int> selected: 0;
+    // Starts on Cancel, the safe choice, so a stray Return never confirms.
+    private property <int> selected: root.labels.length;
     private property <int> count: root.labels.length + 1;
     visible: root.open || root.progress > 0;
     accessible-role: groupbox;
     accessible-label: root.prompt;
     accessible-enabled: root.open;
     changed open => {
-        if root.open { root.selected = 0; scope.focus(); }
+        if root.open { root.selected = root.labels.length; scope.focus(); }
     }
     init => { if root.open { scope.focus(); } }
     function pick(index: int) { if root.open { root.choice(index); } }
@@ -47,8 +49,12 @@ export component ChoiceDialog inherits Rectangle {
             TouchArea { enabled: root.open; clicked => { root.pick(root.labels.length); } }
         }
         panel := Rectangle {
+            // The prompt scrolls inside what the window leaves after the fixed
+            // choices, so every choice stays on screen in a small window.
+            private property <length> rows-height: (root.labels.length + 1) * 44px + 12px;
+            private property <length> prompt-height: min(prompt-text.preferred-height + 16px, max(40px, root.height - root.safe-top - root.safe-bottom - 32px - self.rows-height - 8px));
             width: min(320px, max(1px, root.width - root.safe-left - root.safe-right - 32px));
-            height: content.preferred-height;
+            height: self.prompt-height + 8px + self.rows-height;
             x: root.safe-left + (root.width - root.safe-left - root.safe-right - self.width) / 2;
             y: root.safe-top + max(16px, (root.height - root.safe-top - root.safe-bottom - self.height) / 2);
             background: Theme.current.popup;
@@ -58,17 +64,20 @@ export component ChoiceDialog inherits Rectangle {
             opacity: root.progress;
             transform-scale: 0.86 + 0.14 * root.progress;
             TouchArea { enabled: root.open; }
-            content := VerticalLayout {
-                padding: 6px; spacing: 0px;
-                HorizontalLayout {
-                    padding-left: 10px; padding-right: 10px; padding-top: 8px;
-                    Text {
-                        text: root.prompt; wrap: word-wrap;
-                        color: Theme.current.text_bright; font-size: 15px; font-weight: 600;
-                        accessible-role: none;
-                    }
+            ScrollView {
+                x: 6px; y: 0px; width: parent.width - 12px; height: parent.prompt-height;
+                mouse-drag-pan-enabled: true;
+                content-height: prompt-text.preferred-height + 16px;
+                prompt-text := Text {
+                    x: 4px; y: 8px; width: panel.width - 20px;
+                    text: root.prompt; wrap: word-wrap;
+                    color: Theme.current.text_bright; font-size: 15px; font-weight: 600;
+                    accessible-role: none;
                 }
-                Rectangle { height: 8px; }
+            }
+            VerticalLayout {
+                x: 6px; y: parent.prompt-height + 8px + 6px; width: parent.width - 12px;
+                spacing: 0px;
                 for label[index] in root.labels: MenuItem {
                     live: root.open; label: label;
                     danger: index < root.danger-count;
