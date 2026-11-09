@@ -6,6 +6,9 @@ import { IcPlay, IcInfo, IcStarBorder, IcSchedule, IcPause, IcVolumeUp, IcVolume
 import { KbMark } from "@NovaUiBase/kbnav.slint";
 import { LibraryScroll } from "@NovaUiBase/library-scroll.slint";
 import { MenuSheet } from "@NovaUiBase/menusheet.slint";
+import { MenuItem } from "@NovaUiBase/menu-item.slint";
+import { ChoiceDialog } from "@NovaUiBase/choice-dialog.slint";
+import { ActionDialog } from "@NovaUiBase/action-dialog.slint";
 import { ScrollView } from "@NovaUiBase/scrollview.slint";
 import { SearchField } from "@NovaUiBase/searchfield.slint";
 import { PillButton, ToggleSwitch, AddonIconButton, AddonRowCard, MiniSlider, Segmented, SectionHeader, ValueBox, SettingsLink, SettingsCard, SettingsBackButton, SettingsHeader, SettingsInput } from "@NovaUiBase/settings-controls.slint";
@@ -22,6 +25,9 @@ export component ComponentsSmoke inherits Window {
         LibraryFilterChip { label: "Reading"; tonal: true; count: "8"; chip-height: 36px; }
         SettingsCard {}
         MenuSheet {}
+        MenuItem { label: "Reading"; icon: "M5 12h14"; selected: true; }
+        ChoiceDialog { open: true; prompt: "Delete?"; labels: ["Delete"]; }
+        ActionDialog { title: "Status"; rows: [{ label: "Reading", enabled: true, checked: true, icon: "M5 12h14" }]; }
         NumericSetting { minimum: 1; maximum: 100; value: 85; }
         CacheDiskToggle {}
         CacheDiskLimit { model: ["Unlimited", "1024 MiB"]; keyboard-input-enabled: true; }

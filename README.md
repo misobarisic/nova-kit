@@ -55,6 +55,10 @@ The Cargo package also exposes `DEP_NOVAUIBASE_SLINT_SOURCE_DIR` metadata.
 Nova's compiler extension reads that metadata for source-only imports, including
 inline Slint fixtures. No second compiled global bundle is introduced.
 
+`MenuItem`, `ChoiceDialog` and `ActionDialog` are the popup-style menu row and the centered confirm/action dialogs
+(scale-and-fade entrance, whole-row `selected` state, keyboard selection); both dialogs report `choice`/`picked`
+and cancel through callbacks and animate on the host's `open`.
+
 `MenuSheet` rows and Cancel expose assistive-technology default actions, and
 `Dropdown` rows draw their focus ring while the keyboard or a TV remote drives
 the popup (`keyboard-input-enabled`), so hosts need no source patches for either.

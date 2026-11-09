@@ -1,0 +1,65 @@
+// A 44px icon row for popup menus and dialogs: leading icon, label and an
+// optional trailing count. `highlighted` is keyboard selection owned by the
+// host; `selected` marks the current choice by tinting the whole row, with an
+// accent edge and accent icon and text. `danger` draws it destructive.
+import { Theme, SettingsStyle } from "@NovaUiShared";
+import { ControlTouchArea } from "control-input.slint";
+
+export component MenuItem inherits Rectangle {
+    in property <string> label;
+    // A count or "›" at the trailing edge.
+    in property <string> trailing;
+    in property <string> icon;
+    in property <bool> danger;
+    in property <bool> live: true;
+    // Drawn selected by a host that owns keyboard selection.
+    in property <bool> highlighted;
+    // The current choice: the whole row is tinted, with an accent edge and accent text.
+    in property <bool> selected;
+    callback activated;
+    height: 44px;
+    border-radius: 10px;
+    background: (touch.has-hover || key.has-focus || root.highlighted) && root.live ? Theme.current.control_hover : root.selected ? Theme.current.selection_wash : transparent;
+    border-width: (key.has-focus || root.highlighted) && SettingsStyle.keyboard-mode ? 2px : 0px;
+    border-color: Theme.current.focus_ring;
+    accessible-role: button; accessible-label: root.label; accessible-enabled: root.live;
+    accessible-checkable: root.selected; accessible-checked: root.selected;
+    accessible-description: root.trailing;
+    accessible-action-default => { if root.live { root.activated(); } }
+    Path {
+        x: 12px; y: 12px; width: 20px; height: 20px;
+        viewbox-width: 24; viewbox-height: 24; fill: transparent; stroke-width: 1.8px;
+        stroke: root.danger ? Theme.current.text_destructive : root.selected ? Theme.current.accent_soft : Theme.current.text_secondary;
+        commands: root.icon;
+        accessible-role: none;
+    }
+    if root.trailing != "": Text {
+        x: parent.width - 52px; width: 40px; height: 100%;
+        text: root.trailing; font-size: 13px; horizontal-alignment: right; vertical-alignment: center;
+        color: Theme.current.text_muted;
+        accessible-role: none;
+    }
+    Text {
+        x: 44px; width: parent.width - (root.trailing != "" ? 100px : 52px); height: 100%;
+        text: root.label; font-size: 14px; overflow: elide; vertical-alignment: center;
+        color: root.danger ? Theme.current.text_destructive : root.selected ? Theme.current.accent_soft : Theme.current.text_bright;
+        font-weight: root.selected ? 600 : 400;
+        accessible-role: none;
+    }
+    if root.selected: Rectangle {
+        x: 0px; y: 10px; width: 3px; height: parent.height - 20px; border-radius: 2px;
+        background: Theme.current.accent_soft;
+    }
+    key := FocusScope {
+        enabled: root.live;
+        key-pressed(e) => {
+            if (e.text == Key.Return || e.text == " ") && !e.repeat { root.activated(); return accept; }
+            return reject;
+        }
+    }
+    forward-focus: key;
+    touch := ControlTouchArea {
+        enabled: root.live; mouse-cursor: pointer;
+        clicked => { root.activated(); }
+    }
+}

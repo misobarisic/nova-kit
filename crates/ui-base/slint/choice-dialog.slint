@@ -1,0 +1,88 @@
+// A small centered dialog in the same style as the title, chapter and page
+// menus (popup surface, 14px corners, scale-and-fade entrance). Every
+// confirmation asks through it: the first `danger-count` choices are drawn as
+// destructive, and Cancel is always last. `choice(i)` reports the picked row,
+// or `labels.length` for Cancel, Escape, Back and a tap outside. The host owns
+// `open`; the dialog animates in and out as it changes.
+import { Theme, SettingsStyle, Anim } from "@NovaUiShared";
+import { MenuItem } from "menu-item.slint";
+
+export component ChoiceDialog inherits Rectangle {
+    in property <bool> open;
+    in property <string> prompt;
+    in property <[string]> labels;
+    in property <int> danger-count: 1;
+    in property <length> safe-top;
+    in property <length> safe-bottom;
+    in property <length> safe-left;
+    in property <length> safe-right;
+    callback choice(int);
+    private property <bool> motion: Anim.enabled && Anim.player;
+    private property <float> progress: root.open ? 1 : 0;
+    animate progress { duration: root.motion ? (root.open ? Anim.player_slide : Anim.player_fast) : 0ms; easing: ease-out; }
+    private property <int> selected: 0;
+    private property <int> count: root.labels.length + 1;
+    visible: root.open || root.progress > 0;
+    accessible-role: groupbox;
+    accessible-label: root.prompt;
+    accessible-enabled: root.open;
+    changed open => {
+        if root.open { root.selected = 0; scope.focus(); }
+    }
+    init => { if root.open { scope.focus(); } }
+    function pick(index: int) { if root.open { root.choice(index); } }
+    scope := FocusScope {
+        enabled: root.open;
+        key-pressed(e) => {
+            if !root.open { return reject; }
+            if e.text == Key.Escape || e.text == Key.Back { root.pick(root.labels.length); return accept; }
+            if e.text == Key.UpArrow { SettingsStyle.keyboard-mode = true; root.selected = Math.max(0, root.selected - 1); return accept; }
+            if e.text == Key.DownArrow { SettingsStyle.keyboard-mode = true; root.selected = Math.min(root.count - 1, root.selected + 1); return accept; }
+            if (e.text == Key.Return || e.text == " ") && !e.repeat { root.pick(root.selected); return accept; }
+            return reject;
+        }
+        Rectangle {
+            background: Theme.current.scrim_shadow;
+            opacity: root.progress;
+            TouchArea { enabled: root.open; clicked => { root.pick(root.labels.length); } }
+        }
+        panel := Rectangle {
+            width: min(320px, max(1px, root.width - root.safe-left - root.safe-right - 32px));
+            height: content.preferred-height;
+            x: root.safe-left + (root.width - root.safe-left - root.safe-right - self.width) / 2;
+            y: root.safe-top + max(16px, (root.height - root.safe-top - root.safe-bottom - self.height) / 2);
+            background: Theme.current.popup;
+            border-radius: 14px; border-width: 1px; border-color: Theme.current.border_soft;
+            drop-shadow-offset-y: 8px; drop-shadow-blur: 24px; drop-shadow-color: #00000070;
+            clip: true;
+            opacity: root.progress;
+            transform-scale: 0.86 + 0.14 * root.progress;
+            TouchArea { enabled: root.open; }
+            content := VerticalLayout {
+                padding: 6px; spacing: 0px;
+                HorizontalLayout {
+                    padding-left: 10px; padding-right: 10px; padding-top: 8px;
+                    Text {
+                        text: root.prompt; wrap: word-wrap;
+                        color: Theme.current.text_bright; font-size: 15px; font-weight: 600;
+                        accessible-role: none;
+                    }
+                }
+                Rectangle { height: 8px; }
+                for label[index] in root.labels: MenuItem {
+                    live: root.open; label: label;
+                    danger: index < root.danger-count;
+                    highlighted: SettingsStyle.keyboard-mode && root.selected == index;
+                    icon: index < root.danger-count ? "M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7" : "M5 12.5l4.5 4.5L19 7.5";
+                    activated => { root.pick(index); }
+                }
+                MenuItem {
+                    live: root.open; label: @tr("Cancel");
+                    highlighted: SettingsStyle.keyboard-mode && root.selected == root.labels.length;
+                    icon: "M6 6l12 12M18 6L6 18";
+                    activated => { root.pick(root.labels.length); }
+                }
+            }
+        }
+    }
+}

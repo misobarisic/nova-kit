@@ -1,0 +1,100 @@
+// A titled list of actions in the same panel style as the title, chapter and
+// page menus (popup surface, 14px corners, scale-and-fade entrance), used where
+// the kit's bottom action sheet used to be. The panel is arithmetic (title,
+// rows of 44px, Cancel), capped to the window, with the rows scrolling inside.
+// `picked(i)` reports an enabled row; Cancel, Escape, Back and a tap outside
+// call `closed`.
+import { Theme, SettingsStyle, Anim } from "@NovaUiShared";
+import { ScrollView } from "scrollview.slint";
+import { MenuItem } from "menu-item.slint";
+
+export struct DialogRow { label: string, enabled: bool, danger: bool, checked: bool, icon: string }
+
+export component ActionDialog inherits Rectangle {
+    in property <bool> open: true;
+    in property <string> title;
+    in property <[DialogRow]> rows;
+    in property <length> safe-top;
+    in property <length> safe-bottom;
+    in property <length> safe-left;
+    in property <length> safe-right;
+    callback picked(int);
+    callback closed;
+    private property <bool> armed: false;
+    private property <bool> motion: Anim.enabled && Anim.player;
+    // Armed a tick after mounting so a dialog created open still animates in.
+    private property <float> progress: root.open && root.armed ? 1 : 0;
+    animate progress { duration: root.motion ? (root.open ? Anim.player_slide : Anim.player_fast) : 0ms; easing: ease-out; }
+    private property <int> selected: 0;
+    private property <length> chrome: 6px + (root.title != "" ? 40px : 0px) + 44px + 6px;
+    private property <length> available: max(44px, root.height - root.safe-top - root.safe-bottom - 32px);
+    private property <length> list-height: min(root.rows.length * 44px, max(44px, root.available - root.chrome));
+    visible: root.open || root.progress > 0;
+    accessible-role: groupbox;
+    accessible-label: root.title;
+    accessible-enabled: root.open;
+    init => { arm.start(); if root.open { scope.focus(); } }
+    arm := Timer { interval: 1ms; running: false; triggered => { self.stop(); root.armed = true; } }
+    changed open => { if root.open { root.selected = 0; scope.focus(); } }
+    function pick(index: int) {
+        if !root.open { return; }
+        if index >= root.rows.length { root.closed(); }
+        else if root.rows[index].enabled { root.picked(index); }
+    }
+    scope := FocusScope {
+        enabled: root.open;
+        key-pressed(e) => {
+            if !root.open { return reject; }
+            if e.text == Key.Escape || e.text == Key.Back { root.closed(); return accept; }
+            if e.text == Key.UpArrow { SettingsStyle.keyboard-mode = true; root.selected = Math.max(0, root.selected - 1); return accept; }
+            if e.text == Key.DownArrow { SettingsStyle.keyboard-mode = true; root.selected = Math.min(root.rows.length, root.selected + 1); return accept; }
+            if (e.text == Key.Return || e.text == " ") && !e.repeat { root.pick(root.selected); return accept; }
+            return reject;
+        }
+        Rectangle {
+            background: Theme.current.scrim_shadow;
+            opacity: root.progress;
+            TouchArea { enabled: root.open; clicked => { root.closed(); } }
+        }
+        panel := Rectangle {
+            width: min(340px, max(1px, root.width - root.safe-left - root.safe-right - 32px));
+            height: root.chrome + root.list-height;
+            x: root.safe-left + (root.width - root.safe-left - root.safe-right - self.width) / 2;
+            y: root.safe-top + max(16px, (root.height - root.safe-top - root.safe-bottom - self.height) / 2);
+            background: Theme.current.popup;
+            border-radius: 14px; border-width: 1px; border-color: Theme.current.border_soft;
+            drop-shadow-offset-y: 8px; drop-shadow-blur: 24px; drop-shadow-color: #00000070;
+            clip: true;
+            opacity: root.progress;
+            transform-scale: 0.86 + 0.14 * root.progress;
+            TouchArea { enabled: root.open; }
+            if root.title != "": Text {
+                x: 16px; y: 6px; width: parent.width - 32px; height: 40px;
+                text: root.title; overflow: elide; vertical-alignment: center;
+                color: Theme.current.text_bright; font-size: 14px; font-weight: 600;
+                accessible-role: none;
+            }
+            ScrollView {
+                x: 6px; y: 6px + (root.title != "" ? 40px : 0px);
+                width: parent.width - 12px; height: root.list-height;
+                mouse-drag-pan-enabled: true;
+                VerticalLayout {
+                    for row[index] in root.rows: MenuItem {
+                        live: root.open && row.enabled; label: row.label; danger: row.danger;
+                        selected: row.checked;
+                        highlighted: SettingsStyle.keyboard-mode && root.selected == index;
+                        icon: row.icon;
+                        activated => { root.pick(index); }
+                    }
+                }
+            }
+            MenuItem {
+                x: 6px; y: parent.height - 50px; width: parent.width - 12px;
+                live: root.open; label: @tr("Cancel");
+                highlighted: SettingsStyle.keyboard-mode && root.selected == root.rows.length;
+                icon: "M6 6l12 12M18 6L6 18";
+                activated => { root.pick(root.rows.length); }
+            }
+        }
+    }
+}
