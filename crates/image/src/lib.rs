@@ -70,6 +70,7 @@ pub fn encode_avif(
         || count > limits.max_pixels
         || bytes > limits.max_decoded_bytes
         || usize::try_from(bytes).ok() != Some(pixels.len())
+        || avif::working_bytes(width, height, 0).is_none_or(|w| w > limits.max_decoded_bytes)
     {
         return Err(Error::Limit);
     }
@@ -89,7 +90,10 @@ pub fn encode_avif(
         .encode_rgba(ravif::Img::new(&rgba, width as usize, height as usize))
         .map_err(|error| Error::Avif(format!("Cannot encode AVIF image: {error}")))?
         .avif_file;
-    if bytes.len() > limits.max_encoded_bytes {
+    if bytes.len() > limits.max_encoded_bytes
+        || avif::working_bytes(width, height, bytes.len())
+            .is_none_or(|w| w > limits.max_decoded_bytes)
+    {
         return Err(Error::Limit);
     }
     Ok(bytes)

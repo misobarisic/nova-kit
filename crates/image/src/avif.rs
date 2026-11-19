@@ -292,16 +292,8 @@ fn parsed_inner(
         height: metadata.max_frame_height.get(),
     };
     let pixels = u64::from(dimensions.width) * u64::from(dimensions.height);
-    let stride = (u64::from(dimensions.width) + 127) & !127;
-    let rows = (u64::from(dimensions.height) + 127) & !127;
-    // Account conservatively for padded decoder working planes, output RGBA,
-    // and parser/coded-data copies before creating any decoder context.
-    let working = (stride + 64)
-        .checked_mul(rows)
-        .and_then(|bytes| bytes.checked_mul(12))
-        .and_then(|bytes| bytes.checked_add(pixels * 4))
-        .and_then(|size| size.checked_add(bytes.len() as u64 * 2))
-        .ok_or(Error::Limit)?;
+    let working =
+        working_bytes(dimensions.width, dimensions.height, bytes.len()).ok_or(Error::Limit)?;
     if dimensions.width > limits.max_width
         || dimensions.height > limits.max_height
         || pixels > limits.max_pixels
@@ -512,6 +504,20 @@ fn luma(value: u8, range: YuvRange) -> u8 {
             ((u32::from(value).saturating_sub(16).min(219) * 255 + 109) / 219) as u8
         }
     }
+}
+
+/// Memory the decoder admits an image against: padded working planes, the
+/// output RGBA and two copies of the coded data. The encoder checks the same
+/// figure, so it never writes an image this decoder would refuse.
+pub(crate) fn working_bytes(width: u32, height: u32, coded: usize) -> Option<u64> {
+    let pixels = u64::from(width) * u64::from(height);
+    let stride = (u64::from(width) + 127) & !127;
+    let rows = (u64::from(height) + 127) & !127;
+    (stride + 64)
+        .checked_mul(rows)
+        .and_then(|bytes| bytes.checked_mul(12))
+        .and_then(|bytes| bytes.checked_add(pixels * 4))
+        .and_then(|size| size.checked_add(coded as u64 * 2))
 }
 
 pub fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<image::RgbaImage> {

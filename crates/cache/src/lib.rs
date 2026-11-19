@@ -515,14 +515,25 @@ fn encode_rgba(rgba: &image::RgbaImage, recipe: ImageRecipe) -> Option<Vec<u8>> 
     let mut bytes = Vec::new();
     match recipe.format {
         Some(CacheImageFormat::Avif) => {
-            bytes = nova_image::encode_avif(
+            bytes = match nova_image::encode_avif(
                 rgba.width(),
                 rgba.height(),
                 rgba.as_raw(),
                 recipe.quality,
                 nova_image::DecodeLimits::default(),
-            )
-            .ok()?;
+            ) {
+                Ok(bytes) => bytes,
+                // Too large for the AVIF decoder's memory budget (a 4K
+                // backdrop): store WebP rather than nothing, or every display
+                // would download and encode again.
+                Err(nova_image::Error::Limit) => {
+                    webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height())
+                        .encode_simple(false, recipe.quality as f32)
+                        .ok()?
+                        .to_vec()
+                }
+                Err(_) => return None,
+            };
         }
         Some(CacheImageFormat::JxlLossless | CacheImageFormat::JxlLossy) => {
             let mode = if recipe.format == Some(CacheImageFormat::JxlLossless) {
