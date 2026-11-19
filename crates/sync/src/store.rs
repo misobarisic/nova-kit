@@ -88,10 +88,18 @@ pub struct Store {
     /// Persisted under [`SEVERED_KEY`], never replicated.
     #[serde(skip)]
     severed: BTreeSet<String>,
+    /// Our clock when each remote tombstone was received. Peer acks name our
+    /// clock at snapshot time, so a tombstone that arrived late with an old
+    /// origin version is only acknowledged once an ack passes its receipt.
+    /// Persisted under [`RECEIPTS_KEY`], never replicated.
+    #[serde(skip)]
+    receipts: BTreeMap<String, BTreeMap<String, Hlc>>,
 }
 
 /// Local-only set of severed peer ids (JSON array).
 const SEVERED_KEY: &str = "sync:severed";
+/// Local-only tombstone receipts (domain -> key -> our HLC on arrival).
+const RECEIPTS_KEY: &str = "sync:tombstone-receipts";
 
 impl Store {
     /// Load from the KV store (empty when absent).
@@ -124,6 +132,9 @@ impl Store {
         let mut store = Self::try_load_records()?;
         if let Some(raw) = nova_storage::try_get_str(SEVERED_KEY)? {
             store.severed = serde_json::from_str(&raw).unwrap_or_default();
+        }
+        if let Some(raw) = nova_storage::try_get_str(RECEIPTS_KEY)? {
+            store.receipts = serde_json::from_str(&raw).unwrap_or_default();
         }
         Ok(store)
     }
@@ -409,6 +420,34 @@ impl Store {
         changed
     }
 
+    fn queue_receipts(&mut self) {
+        let value = (!self.receipts.is_empty())
+            .then(|| serde_json::to_string(&self.receipts).expect("receipts serialize"));
+        self.queue_extra(RECEIPTS_KEY, value);
+    }
+
+    /// Note when a remote tombstone landed (or forget it once the row lives).
+    fn note_receipt(&mut self, domain: &str, key: &str, deleted: bool) {
+        let changed = if deleted && domain != crate::DOMAIN_PEERS {
+            let at = self.hlc;
+            self.receipts
+                .entry(domain.to_string())
+                .or_default()
+                .insert(key.to_string(), at)
+                != Some(at)
+        } else {
+            let removed = self
+                .receipts
+                .get_mut(domain)
+                .is_some_and(|keys| keys.remove(key).is_some());
+            self.receipts.retain(|_, keys| !keys.is_empty());
+            removed
+        };
+        if changed {
+            self.queue_receipts();
+        }
+    }
+
     pub fn queue_extra(&mut self, key: &str, value: Option<String>) {
         self.extra.insert(key.to_string(), value);
     }
@@ -572,9 +611,11 @@ impl Store {
         };
         match resolved {
             Some(record) => {
+                let deleted = record.is_deleted();
                 slot.insert(key.to_string(), record);
                 self.dirty.insert((domain.to_string(), key.to_string()));
                 self.pending_domains.insert(domain.to_string());
+                self.note_receipt(domain, key, deleted);
                 true
             }
             None => false,
@@ -752,6 +793,7 @@ impl Store {
             return 0;
         }
         let mut removed: Vec<(String, String)> = Vec::new();
+        let receipts = &self.receipts;
         for (domain, keys) in self.domains.iter_mut() {
             // A removed device may return after every current peer has acked.
             // Only explicit pairing may supersede this authorization barrier.
@@ -762,10 +804,18 @@ impl Store {
                 if !r.is_deleted() || now_ms.saturating_sub(r.version.ts) <= max_age_ms {
                     return true;
                 }
+                // A late arrival counts from when we received it, not from
+                // its (possibly much older) origin version.
+                let receipt = receipts
+                    .get(domain)
+                    .and_then(|keys| keys.get(key))
+                    .copied()
+                    .filter(|at| at.newer_than(r.version.hlc()))
+                    .unwrap_or(r.version.hlc());
                 let keep = match floor {
                     AckFloor::NoPeers => false,
-                    // Keep when the tombstone is newer than the ack floor.
-                    AckFloor::At(h) => r.version.hlc().newer_than(h),
+                    // Keep until every peer acked past the tombstone's arrival.
+                    AckFloor::At(h) => receipt.newer_than(h),
                     AckFloor::Blocked => true,
                 };
                 if !keep {
@@ -776,6 +826,28 @@ impl Store {
             });
         }
         self.domains.retain(|_, keys| !keys.is_empty());
+        // Receipts at or below the floor (or for rows that are gone or live
+        // again) no longer hold anything back.
+        let before = self.receipts.values().map(BTreeMap::len).sum::<usize>();
+        let domains = &self.domains;
+        self.receipts.retain(|domain, keys| {
+            keys.retain(|key, at| {
+                let tombstone = domains
+                    .get(domain)
+                    .and_then(|rows| rows.get(key))
+                    .is_some_and(Record::is_deleted);
+                tombstone
+                    && match floor {
+                        AckFloor::At(h) => at.newer_than(h),
+                        AckFloor::NoPeers => false,
+                        AckFloor::Blocked => true,
+                    }
+            });
+            !keys.is_empty()
+        });
+        if self.receipts.values().map(BTreeMap::len).sum::<usize>() != before {
+            self.queue_receipts();
+        }
         let count = removed.len();
         self.dirty.extend(removed);
         count
@@ -1526,6 +1598,28 @@ mod tests {
         // A peer that never synced likewise blocks collection.
         s.gc(now, TOMBSTONE_TTL_MS, AckFloor::Blocked);
         assert!(s.domains().contains(&"d".to_string()));
+    }
+
+    #[test]
+    fn gc_waits_for_acks_past_a_late_tombstone_arrival() {
+        let mut s = Store::default();
+        // A peer's floor already sits past the tombstone's origin version, but
+        // it acked before this device ever received the tombstone.
+        let old = Version::new(1_000, 0, DEV_B, true);
+        let stale_floor = Hlc::new(2_000, 0);
+        assert!(s.apply("d", "k", Record::tombstone(old)));
+        let receipt = s.receipts["d"]["k"];
+        assert!(receipt.newer_than(stale_floor));
+        assert!(s.extra.get(RECEIPTS_KEY).is_some_and(Option::is_some));
+        let now = crate::now_ms() + TOMBSTONE_TTL_MS + 1;
+        assert_eq!(s.gc(now, TOMBSTONE_TTL_MS, AckFloor::At(stale_floor)), 0);
+        assert!(s.domains().contains(&"d".to_string()));
+        // Once every peer acked a snapshot taken after the arrival, it goes,
+        // along with its receipt.
+        assert_eq!(s.gc(now, TOMBSTONE_TTL_MS, AckFloor::At(receipt)), 1);
+        assert!(s.domains().is_empty());
+        assert!(s.receipts.is_empty());
+        assert_eq!(s.extra.get(RECEIPTS_KEY), Some(&None));
     }
 
     #[test]
