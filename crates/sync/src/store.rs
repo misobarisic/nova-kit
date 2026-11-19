@@ -127,7 +127,8 @@ impl Store {
                         .flat_map(|(d, keys)| {
                             keys.iter()
                                 .filter(move |(k, r)| {
-                                    !valid_clock(r.version.hlc()) || !crate::policy::valid(d, k, r)
+                                    !plausible_stored_clock(r.version.hlc())
+                                        || !crate::policy::valid(d, k, r)
                                 })
                                 .map(move |(k, r)| {
                                     (
@@ -151,7 +152,7 @@ impl Store {
                         store.domains.get_mut(&domain).unwrap().remove(&key);
                     }
                     store.domains.retain(|_, keys| !keys.is_empty());
-                    if !valid_clock(store.hlc) {
+                    if !plausible_stored_clock(store.hlc) {
                         let backup = format!(
                             "sync:quarantine:{}",
                             blake3::hash(format!("{LEGACY_RECORDS_KEY}\0{raw}").as_bytes())
@@ -189,7 +190,7 @@ impl Store {
         let mut store = Self::default();
         if let Some(raw) = nova_storage::try_get_str(CLOCK_KEY)? {
             match serde_json::from_str::<Hlc>(&raw) {
-                Ok(hlc) if valid_clock(hlc) => store.hlc = hlc,
+                Ok(hlc) if plausible_stored_clock(hlc) => store.hlc = hlc,
                 _ => {
                     quarantine(CLOCK_KEY, &raw)?;
                 }
@@ -206,14 +207,14 @@ impl Store {
             };
             match serde_json::from_str::<Record>(&value) {
                 Ok(record)
-                    if valid_clock(record.version.hlc())
+                    if plausible_stored_clock(record.version.hlc())
                         && crate::policy::valid(&domain, &key, &record) =>
                 {
                     store.domains.entry(domain).or_default().insert(key, record);
                 }
                 _ => {
                     quarantine(&row, &value)?;
-                    tracing::warn!("quarantined invalid or future record; check sync:quarantine:");
+                    tracing::warn!("quarantined invalid or corrupt record; check sync:quarantine:");
                 }
             }
         }
@@ -747,6 +748,21 @@ impl Store {
 
 pub(crate) fn valid_clock(clock: Hlc) -> bool {
     clock.physical_ms <= crate::now_ms().saturating_add(crate::hlc::MAX_DRIFT_MS)
+}
+
+/// No genuine stamp lies past 2100-01-01 UTC; anything beyond is corruption
+/// (such as a pre-HLC seconds value scaled to milliseconds twice).
+const STORED_CLOCK_CEILING_MS: u64 = 4_102_444_800_000;
+
+/// Whether a clock read back from disk is usable. Rows were checked against
+/// the wall clock when they were written or received, so they are never judged
+/// against it again: a device that boots with its clock behind (no RTC before
+/// network time, a dead CMOS battery, the date set back) would otherwise
+/// discard its whole store, pairing and profiles included. `reconcile_clock`
+/// raises the HLC past what is kept, so later local writes still sort after it.
+pub(crate) fn plausible_stored_clock(clock: Hlc) -> bool {
+    clock.physical_ms
+        <= STORED_CLOCK_CEILING_MS.max(crate::now_ms().saturating_add(crate::hlc::MAX_DRIFT_MS))
 }
 
 fn quarantine(key: &str, raw: &str) -> Result<String> {

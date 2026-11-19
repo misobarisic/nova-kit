@@ -111,9 +111,9 @@ pub(crate) fn valid(record: &Record) -> bool {
     [Some(&s.activity), s.watched.as_ref(), s.unwatch.as_ref()]
         .into_iter()
         .flatten()
-        .all(|c| {
-            !c.version.newer_than(&record.version) && crate::store::valid_clock(c.version.hlc())
-        })
+        // Bounded by the record's own version; that version is checked against
+        // the wall clock on receipt, but not when the store is reloaded.
+        .all(|c| !c.version.newer_than(&record.version))
 }
 fn max(a: Candidate, b: Candidate) -> Candidate {
     if b.version.newer_than(&a.version)

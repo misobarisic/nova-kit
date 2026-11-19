@@ -72,7 +72,24 @@ fn legacy_blob_migrates_and_rows_round_trip() {
     assert!(after.record("progress", "live").is_some());
 
     // Bad keys, poisoned clocks, and old active-prefix backups recover once.
+    // A row merely ahead of the wall clock (this device booted with its clock
+    // behind) is kept: it was valid when written.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let ahead_ms = now_ms + 10 * 24 * 60 * 60 * 1000;
     nova_storage::try_write_batch(&[
+        (
+            "srec:7:libraryahead".into(),
+            Some(
+                serde_json::to_string(&nova_sync::Record {
+                    value: Some("kept".into()),
+                    version: nova_sync::Version::new(ahead_ms, 0, 1, false),
+                })
+                .unwrap(),
+            ),
+        ),
         ("srec:1:é:key".into(), Some("bad".into())),
         ("srec:7:library:bad".into(), Some("{broken".into())),
         (
@@ -100,6 +117,14 @@ fn legacy_blob_migrates_and_rows_round_trip() {
     assert_eq!(evidence.len(), 5);
     assert!(recovered.record("library", "a").is_some());
     assert!(recovered.record("library", "future").is_none());
+    assert_eq!(
+        recovered
+            .record("library", "ahead")
+            .unwrap()
+            .value
+            .as_deref(),
+        Some("kept")
+    );
     Store::try_load().unwrap();
     assert_eq!(
         nova_storage::try_scan_prefix("sync:quarantine:").unwrap(),
