@@ -11,7 +11,7 @@
 //! end-of-central-directory record before the crate parses the directory), the
 //! declared and actual size of each entry, and the total expanded size.
 use ::zip::ZipArchive;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
 const CENTRAL_SIGNATURE: &[u8; 4] = b"PK\x01\x02";
@@ -162,6 +162,9 @@ pub struct Entry {
 pub struct Archive<R> {
     zip: ZipArchive<R>,
     entries: Vec<Entry>,
+    /// Position in `entries` by name: restores look up one entry per page, and
+    /// a linear scan over hundreds of thousands of entries made them quadratic.
+    by_name: HashMap<String, usize>,
     limits: Limits,
     read: u64,
 }
@@ -217,7 +220,7 @@ impl<R: Read + Seek> Archive<R> {
         reader.rewind()?;
         let mut zip = ZipArchive::new(reader)?;
         let mut entries = Vec::with_capacity(zip.len());
-        let mut names = HashSet::with_capacity(zip.len());
+        let mut by_name = HashMap::with_capacity(zip.len());
         let mut declared = 0u64;
         let (mut ordinary, mut streamed_records) = (0usize, 0usize);
         for index in 0..zip.len() {
@@ -250,7 +253,7 @@ impl<R: Read + Seek> Archive<R> {
             if linked || (policy.regular_files_only && !is_dir && irregular) {
                 return Err(Error::NotRegular);
             }
-            if !names.insert(name.clone()) {
+            if by_name.insert(name.clone(), entries.len()).is_some() {
                 return Err(Error::DuplicateEntry);
             }
             let size = file.size();
@@ -281,6 +284,7 @@ impl<R: Read + Seek> Archive<R> {
         Ok(Self {
             zip,
             entries,
+            by_name,
             limits,
             read: 0,
         })
@@ -291,7 +295,7 @@ impl<R: Read + Seek> Archive<R> {
     }
 
     pub fn find(&self, name: &str) -> Option<&Entry> {
-        self.entries.iter().find(|entry| entry.name == name)
+        self.by_name.get(name).map(|&position| &self.entries[position])
     }
 
     /// Read one entry fully. `max_bytes` is the caller's own cap for this entry
