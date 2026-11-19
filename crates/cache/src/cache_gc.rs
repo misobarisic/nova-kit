@@ -323,6 +323,15 @@ pub(super) fn mark_invalid(path: &Path) {
     }
 }
 
+/// Abort a reconcile or eviction scan of this directory that is in progress,
+/// without touching any other cache: files were removed under it.
+pub(super) fn invalidate_scans(directory: &Path) {
+    if let Some(tracker) = tracker(directory) {
+        let mut state = tracker.state.lock().unwrap();
+        state.epoch = state.epoch.wrapping_add(1);
+    }
+}
+
 pub(super) fn cleared(directory: &Path) {
     variant_index_cleared(directory);
     if let Some(tracker) = tracker(directory) {

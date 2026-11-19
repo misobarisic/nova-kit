@@ -284,8 +284,11 @@ impl Cache {
     pub fn clear_matching(&self, matches: impl Fn(&str) -> bool) -> (u64, usize) {
         let _maintenance = MaintenanceGuard::acquire();
         let _mutation = CACHE_MUTATION.write().unwrap();
+        // This cache's own generation guards its writes. The process-wide
+        // counter would also void in-flight loads and scans of every other
+        // cache (covers going blank while thumbnails are cleared).
         self.generation.fetch_add(1, Ordering::AcqRel);
-        CACHE_GENERATION.fetch_add(1, Ordering::AcqRel);
+        gc::invalidate_scans(&self.directory);
         let mut removed = (0u64, 0usize);
         for (path, size) in matching_variants(&self.directory, &matches) {
             if fs::remove_file(&path).is_ok() {
@@ -300,8 +303,8 @@ impl Cache {
     pub fn clear(&self) -> (u64, usize) {
         let _maintenance = MaintenanceGuard::acquire();
         let _mutation = CACHE_MUTATION.write().unwrap();
+        // See `clear_matching`; `cleared` resets this directory's tracker.
         self.generation.fetch_add(1, Ordering::AcqRel);
-        CACHE_GENERATION.fetch_add(1, Ordering::AcqRel);
         gc::cleared(&self.directory);
         let mut removed = (0u64, 0usize);
         if let Ok(entries) = fs::read_dir(&self.directory) {
