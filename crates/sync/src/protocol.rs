@@ -968,6 +968,10 @@ struct RemoveNotice {
 }
 
 const REMOVE_PROTO: u8 = 1;
+/// A removal notice is one small frame; a peer that stalls is dropped.
+const REMOVE_TIMEOUT: Duration = Duration::from_secs(10);
+/// The remover's name is shown in a notice; longer text is cut.
+const MAX_REMOVER_NAME_CHARS: usize = 64;
 
 /// Best-effort: tell `peer` directly that we removed it, so it drops us instead
 /// of keeping a dead peer and retrying forever. A failure is harmless (the peer
@@ -1011,7 +1015,16 @@ impl RemoveHandler {
 impl ProtocolHandler for RemoveHandler {
     async fn accept(&self, conn: Connection) -> Result<(), iroh::protocol::AcceptError> {
         let remote = conn.remote_id().to_string();
-        let result = async {
+        // Only a paired device may tell us it removed us. Anyone else who
+        // learned our endpoint id could otherwise show the notice at will.
+        if !self.handler.is_peer(&remote) {
+            tracing::debug!(
+                peer = crate::short_id(&remote),
+                "removal notice from a non-peer"
+            );
+            return Ok(());
+        }
+        let result = tokio::time::timeout(REMOVE_TIMEOUT, async {
             let (mut send, mut recv) = conn.accept_bi().await.context("accept remove stream")?;
             let notice: RemoveNotice = frame::read_frame(&mut recv)
                 .await?
@@ -1021,15 +1034,17 @@ impl ProtocolHandler for RemoveHandler {
             }
             tracing::info!(peer = crate::short_id(&remote), "peer removed us");
             self.handler.sever_peer(&remote);
-            self.handler.set_removed_notice(notice.name);
+            self.handler
+                .set_removed_notice(notice.name.chars().take(MAX_REMOVER_NAME_CHARS).collect());
             self.handler.reconcile_peers();
             self.handler
                 .emit_remote(vec![crate::DOMAIN_PEERS.to_string()]);
             let _ = frame::write_frame(&mut send, &0u8).await;
             let _ = send.finish();
             Ok::<(), anyhow::Error>(())
-        }
-        .await;
+        })
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("removal notice timed out")));
         if let Err(e) = result {
             tracing::debug!(error = %format_args!("{e:#}"), "removal notice failed");
         }
@@ -2350,6 +2365,39 @@ mod tests {
         assert!(applied.removed_us);
         // We never add ourselves.
         assert!(store.records(crate::DOMAIN_PEERS).is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn removal_notice_from_a_stranger_is_ignored() {
+        let stranger = endpoint().await;
+        let a = endpoint().await;
+        let b = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .alpns(vec![ALPN.to_vec(), REMOVE_ALPN.to_vec()])
+            .bind()
+            .await
+            .unwrap();
+        let aid = a.id().to_string();
+        let bid = b.id().to_string();
+        let b_store = store_with_peers(&[(&aid, "Alice")]);
+        let b_handler = handler(b_store.clone(), 2, &bid, allowlist(&b_store));
+        let _rb = iroh::protocol::Router::builder(b.clone())
+            .accept(ALPN, b_handler.clone())
+            .accept(REMOVE_ALPN, Arc::new(RemoveHandler::new(b_handler.clone())))
+            .spawn();
+
+        notify_removed(&stranger, b.addr(), "Mallory").await;
+
+        assert_eq!(b_handler.take_removed_notice(), None);
+        assert!(b_handler.peers.lock().unwrap().contains(&aid));
+        let stranger_id = stranger.id().to_string();
+        assert!(
+            b_store
+                .lock()
+                .unwrap()
+                .record(crate::DOMAIN_PEERS, &stranger_id)
+                .is_none(),
+            "a stranger leaves no record behind"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
