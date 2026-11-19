@@ -191,10 +191,17 @@ impl<R: Read + Seek> Archive<R> {
             .max_entries
             .saturating_add(streamed.map_or(0, |streamed| streamed.max_entries));
         let length = reader.seek(SeekFrom::End(0))?;
-        // Bound the work the zip crate will do before it parses anything.
-        if let Some(end) = read_end_record(&mut reader, length)?
-            && (end.records > capacity as u64
-                || end.size > (capacity as u64).saturating_mul(DIRECTORY_BYTES_PER_RECORD))
+        // Bound the work the zip crate will do before it parses anything. The
+        // crate searches the whole file for an end record and tolerates bytes
+        // after it, so an archive our strict search cannot bound is refused
+        // rather than handed over unchecked.
+        let Some(end) = read_end_record(&mut reader, length)? else {
+            return Err(Error::Archive(::zip::result::ZipError::InvalidArchive(
+                "no end of central directory record at the end of the file".into(),
+            )));
+        };
+        if end.records > capacity as u64
+            || end.size > (capacity as u64).saturating_mul(DIRECTORY_BYTES_PER_RECORD)
         {
             return Err(Error::TooManyEntries);
         }
@@ -374,8 +381,8 @@ struct EndRecord {
     size: u64,
 }
 
-/// The directory's declared record count and byte size, or `None` when the end
-/// record cannot be located (the `zip` crate then produces the real error).
+/// The directory's declared record count and byte size, or `None` when no end
+/// record ends exactly at the end of the file.
 fn read_end_record<R: Read + Seek>(
     reader: &mut R,
     length: u64,
@@ -704,6 +711,25 @@ mod tests {
         assert!(matches!(
             archive.copy(5, 100, &mut Vec::new()),
             Err(Error::Missing)
+        ));
+    }
+
+    #[test]
+    fn bytes_after_the_end_record_cannot_skip_the_entry_bound() {
+        let names: Vec<String> = (0..40).map(|i| format!("{i:02}.txt")).collect();
+        let files: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), &b"x"[..])).collect();
+        let mut bytes = build(&files);
+        assert!(matches!(
+            open(&bytes, Policy::FILES),
+            Err(Error::TooManyEntries)
+        ));
+        // The zip crate would still find this end record; the bound must too,
+        // or refuse outright.
+        bytes.push(0);
+        assert!(ZipArchive::new(Cursor::new(&bytes[..])).is_ok());
+        assert!(matches!(
+            open(&bytes, Policy::FILES),
+            Err(Error::Archive(_))
         ));
     }
 
