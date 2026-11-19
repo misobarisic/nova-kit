@@ -176,20 +176,33 @@ impl Addon {
     /// * `https://host/manifest.json` / `https://host/path/manifest.json`
     /// * `https://host/configure` / `https://host/path/configure`
     ///
-    /// A bare host (no scheme) is assumed to be `https`.
+    /// A bare host (no scheme) is assumed to be `https`, and Stremio's
+    /// `stremio://host/…` install links mean `https://host/…`.
+    ///
+    /// URLs that cannot serve as a base (`view-source:…`, `blob:…`, a pasted
+    /// `URL: https://…` label) and `file:` URLs are rejected: every endpoint
+    /// URL is joined onto the base, which needs a hierarchical URL with a host.
     pub fn new(install_url: &str) -> Result<Self, Error> {
         let trimmed = install_url.trim();
         if trimmed.is_empty() {
             return Err(Error::InvalidUrl(install_url.into()));
         }
 
-        let with_scheme = if trimmed.contains("://") {
+        let with_scheme = if let Some(rest) = trimmed.strip_prefix("stremio://") {
+            format!("https://{rest}")
+        } else if trimmed.contains("://") {
             trimmed.to_string()
         } else {
             format!("https://{trimmed}")
         };
 
         let mut url = Url::parse(&with_scheme).map_err(|_| Error::InvalidUrl(trimmed.into()))?;
+        if url.cannot_be_a_base()
+            || url.scheme() == "file"
+            || url.host_str().is_none_or(str::is_empty)
+        {
+            return Err(Error::InvalidUrl(trimmed.into()));
+        }
 
         // Strip well-known suffixes so the remaining path is the base.
         let mut path = url.path().to_string();
@@ -364,7 +377,9 @@ impl Addon {
 
     fn join(&self, path: &str) -> Url {
         // `self.base` always ends with '/', so `join` appends relative to it.
-        self.base.join(path).expect("static relative paths join")
+        // `new` only accepts hierarchical bases, so this cannot fail; still
+        // never panic on a value that came from user input or sync.
+        self.base.join(path).unwrap_or_else(|_| self.base.clone())
     }
 
     /// Percent-encode a value for use inside a URL path segment.
@@ -549,6 +564,30 @@ mod tests {
             assert_eq!(addon.base_url(), expected.trim_end_matches('/'));
         }
         assert!(Addon::new("").is_err());
+        assert_eq!(
+            Addon::new("stremio://addon.example/path/manifest.json")
+                .unwrap()
+                .base_url(),
+            "https://addon.example/path"
+        );
+    }
+
+    #[test]
+    fn non_hierarchical_urls_are_rejected_instead_of_panicking() {
+        for input in [
+            "view-source:https://addon.example/manifest.json",
+            "blob:https://addon.example/abc",
+            "URL: https://addon.example/manifest.json",
+            "file:///etc/manifest.json",
+        ] {
+            assert!(Addon::new(input).is_err(), "{input}");
+        }
+        // Internal non-special schemes with a host keep working.
+        let provider = Addon::new("nova-provider://provider.id").unwrap();
+        assert_eq!(
+            provider.manifest_url(),
+            "nova-provider://provider.id/manifest.json"
+        );
     }
 
     #[test]
