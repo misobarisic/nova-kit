@@ -585,22 +585,31 @@ fn encode_rgba(rgba: &image::RgbaImage, recipe: ImageRecipe) -> Option<Vec<u8>> 
 fn process_source(bytes: Vec<u8>, recipe: ImageRecipe) -> Option<Processed> {
     process_source_with(bytes, recipe, encode_rgba)
 }
+/// The recipe's lossless JPEG → JPEG XL transcode, when it applies: the
+/// setting is on, no resize is needed and the source is a JPEG. Shared by
+/// loads and "Rewrite cache" so both store the same variant.
+fn jpeg_transcode(
+    bytes: &[u8],
+    source: &image::DynamicImage,
+    recipe: ImageRecipe,
+) -> Option<Vec<u8>> {
+    if !recipe.jxl_lossless_jpeg
+        || recipe
+            .max_side
+            .is_some_and(|side| source.width().max(source.height()) > side)
+    {
+        return None;
+    }
+    let _permit = EncodingPermit::acquire();
+    nova_image::transcode_jpeg_to_jxl(bytes, nova_image::DecodeLimits::default()).ok()
+}
 fn process_source_with(
     bytes: Vec<u8>,
     recipe: ImageRecipe,
     encoder: impl FnOnce(&image::RgbaImage, ImageRecipe) -> Option<Vec<u8>>,
 ) -> Option<Processed> {
     let source = decode_source(&bytes).ok()?;
-    let transcode = if recipe.jxl_lossless_jpeg
-        && recipe
-            .max_side
-            .is_none_or(|side| source.width().max(source.height()) <= side)
-    {
-        let _permit = EncodingPermit::acquire();
-        nova_image::transcode_jpeg_to_jxl(&bytes, nova_image::DecodeLimits::default()).ok()
-    } else {
-        None
-    };
+    let transcode = jpeg_transcode(&bytes, &source, recipe);
     let resized = fit_source(source, recipe.max_side)?;
     let rgba = resized.into_rgba8();
     let encoded = if transcode.is_some() {
@@ -2173,17 +2182,18 @@ fn rewrite_entries_with(
                 result.cancelled = true;
                 break;
             }
-            let fitted = match recipe.max_side {
-                Some(side) if source.width().max(source.height()) > side => {
-                    source.resize(side, side, image::imageops::FilterType::Triangle)
-                }
-                _ => source.clone(),
-            };
-            let rgba = fitted.into_rgba8();
-            let encoded = if !recipe.compress && recipe.max_side.is_none() {
+            let encoded = if let Some(transcoded) = jpeg_transcode(&bytes, &source, recipe) {
+                Some(transcoded)
+            } else if !recipe.compress && recipe.max_side.is_none() {
                 Some(bytes.clone())
             } else {
-                encode_rgba(&rgba, recipe)
+                let fitted = match recipe.max_side {
+                    Some(side) if source.width().max(source.height()) > side => {
+                        source.resize(side, side, image::imageops::FilterType::Triangle)
+                    }
+                    _ => source.clone(),
+                };
+                encode_rgba(&fitted.into_rgba8(), recipe)
             };
             let Some(encoded) = encoded else {
                 result.failed += 1;
