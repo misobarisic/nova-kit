@@ -219,7 +219,11 @@ mod tests {
     #[test]
     fn repeated_refusals_back_off_and_a_lost_service_is_started_again() {
         let service = service();
-        service.driver().outcomes.borrow_mut().extend([false, false]);
+        service
+            .driver()
+            .outcomes
+            .borrow_mut()
+            .extend([false, false]);
         let t0 = Instant::now();
         let tick = |ms: u64| service.set_at(true, "D", "x", t0 + Duration::from_millis(ms));
         tick(0);

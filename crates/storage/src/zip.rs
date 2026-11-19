@@ -295,7 +295,9 @@ impl<R: Read + Seek> Archive<R> {
     }
 
     pub fn find(&self, name: &str) -> Option<&Entry> {
-        self.by_name.get(name).map(|&position| &self.entries[position])
+        self.by_name
+            .get(name)
+            .map(|&position| &self.entries[position])
     }
 
     /// Read one entry fully. `max_bytes` is the caller's own cap for this entry
