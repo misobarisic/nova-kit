@@ -75,11 +75,14 @@ pub(super) fn decode(value: &[u8]) -> Result<String, Error> {
 
 /// Exact bytes are cheap; JSON object ordering is not a meaningful update.
 /// Arrays, timestamps, numbers and unknown fields still participate in equality.
+/// Only documents compare as JSON: two different plain strings that parse to
+/// the same number ("1.1" and "1.10") are different values for the caller.
 pub(super) fn equivalent(previous: &str, next: &str) -> bool {
+    use serde_json::Value;
     previous == next
         || matches!(
-            (serde_json::from_str::<serde_json::Value>(previous), serde_json::from_str::<serde_json::Value>(next)),
-            (Ok(a), Ok(b)) if a == b
+            (serde_json::from_str::<Value>(previous), serde_json::from_str::<Value>(next)),
+            (Ok(a @ (Value::Object(_) | Value::Array(_))), Ok(b)) if a == b
         )
 }
 
@@ -134,5 +137,7 @@ mod tests {
         assert!(!equivalent(r#"{"a":1}"#, r#"{"a":1,"extension":true}"#));
         assert!(equivalent("not JSON", "not JSON"));
         assert!(!equivalent("not JSON", "different"));
+        assert!(!equivalent("1.1", "1.10"));
+        assert!(!equivalent("18446744073709551616", "18446744073709551617"));
     }
 }
