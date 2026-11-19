@@ -212,16 +212,22 @@ impl Driver for JniDriver {
             }
             let title = env.new_string(title)?;
             let text = env.new_string(text)?;
-            env.call_static_method(
-                &class,
-                "update",
-                "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)V",
-                &[
-                    JValue::Object(&context),
-                    JValue::Object(&title),
-                    JValue::Object(&text),
-                ],
-            )?;
+            let running = env
+                .call_static_method(
+                    &class,
+                    "update",
+                    "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)Z",
+                    &[
+                        JValue::Object(&context),
+                        JValue::Object(&title),
+                        JValue::Object(&text),
+                    ],
+                )?
+                .z()?;
+            // Android stopped the service (time limit, system) behind our back.
+            if !running {
+                started = false;
+            }
             Ok(())
         });
         started

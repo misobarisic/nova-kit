@@ -1,7 +1,7 @@
 //! The download foreground service as seen from Rust: start it on the first
 //! busy tick, refresh its notification at most once a second, stop it when the
-//! queue empties, and try again on the next tick after the platform refused to
-//! start it.
+//! queue empties, and start it again when the platform refused it or stopped
+//! it. One refusal is retried on the next tick; repeated ones back off.
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -16,7 +16,8 @@ pub trait Driver {
     fn stop(&self);
     /// Start the service first when `start` is set, then refresh its
     /// notification. Returns whether the service is running afterwards: false
-    /// when the platform rejected the start or there was no context to ask.
+    /// when the platform rejected the start, stopped the service on its own,
+    /// or there was no context to ask.
     fn apply(&self, start: bool, title: &str, text: &str) -> bool;
 }
 
@@ -25,7 +26,13 @@ pub struct DownloadService<D> {
     active: AtomicBool,
     /// Last notification text and when it was pushed, for throttling.
     last: Mutex<Option<(String, Instant)>>,
+    /// Consecutive refused or lost starts, and when the next may be tried.
+    retry: Mutex<(u32, Option<Instant>)>,
 }
+
+/// First wait after a second consecutive refusal; it doubles up to the cap.
+const RETRY_DELAY: Duration = Duration::from_secs(5);
+const RETRY_CAP: Duration = Duration::from_secs(60);
 
 impl<D: Driver> DownloadService<D> {
     pub const fn new(driver: D) -> Self {
@@ -33,6 +40,7 @@ impl<D: Driver> DownloadService<D> {
             driver,
             active: AtomicBool::new(false),
             last: Mutex::new(None),
+            retry: Mutex::new((0, None)),
         }
     }
 
@@ -55,6 +63,19 @@ impl<D: Driver> DownloadService<D> {
 
     /// [`set`](Self::set) with the clock supplied, for tests of the throttle.
     pub fn set_at(&self, busy: bool, title: &str, text: &str, now: Instant) {
+        if busy
+            && !self.active.load(Ordering::Acquire)
+            && self
+                .retry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .1
+                .is_some_and(|at| now < at)
+        {
+            // Backing off after repeated refusals: no start, no permission
+            // prompt and no logged exception four times a second.
+            return;
+        }
         let was_active = self.active.swap(busy, Ordering::AcqRel);
         let changed = was_active != busy;
         if !busy {
@@ -76,12 +97,22 @@ impl<D: Driver> DownloadService<D> {
             }
             *last = Some((body, now));
         }
-        if !self.driver.apply(!was_active, title, text) {
+        let mut retry = self.retry.lock().unwrap_or_else(|e| e.into_inner());
+        if self.driver.apply(!was_active, title, text) {
+            *retry = (0, None);
+        } else {
             // The caller serializes start/update/stop calls. A platform
-            // rejection must leave the next busy tick able to retry without an
-            // idle cycle.
+            // rejection (or a service Android stopped) leaves the next busy
+            // tick able to start again; after the first, waits grow.
             self.active.store(false, Ordering::Release);
             *self.last.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            let failures = retry.0.saturating_add(1);
+            let wait = (failures >= 2).then(|| {
+                RETRY_DELAY
+                    .saturating_mul(1 << (failures - 2).min(4))
+                    .min(RETRY_CAP)
+            });
+            *retry = (failures, wait.map(|wait| now + wait));
         }
     }
 }
@@ -183,5 +214,27 @@ mod tests {
             t0 + Duration::from_secs(2),
         );
         assert_eq!(calls(&service)[2], "Downloading/Preparing");
+    }
+
+    #[test]
+    fn repeated_refusals_back_off_and_a_lost_service_is_started_again() {
+        let service = service();
+        service.driver().outcomes.borrow_mut().extend([false, false]);
+        let t0 = Instant::now();
+        let tick = |ms: u64| service.set_at(true, "D", "x", t0 + Duration::from_millis(ms));
+        tick(0);
+        tick(250);
+        // Two refusals in a row: nothing for five seconds.
+        tick(500);
+        tick(4_900);
+        assert_eq!(calls(&service).len(), 2);
+        tick(5_300);
+        assert_eq!(calls(&service)[2], "start+D/x");
+        // Running; then Android stops it, which the next refresh reports.
+        service.driver().outcomes.borrow_mut().push(false);
+        service.set_at(true, "D", "y", t0 + Duration::from_millis(6_500));
+        assert!(!service.is_active());
+        service.set_at(true, "D", "y", t0 + Duration::from_millis(6_750));
+        assert_eq!(calls(&service).last().unwrap(), "start+D/y");
     }
 }
