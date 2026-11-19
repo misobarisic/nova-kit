@@ -58,6 +58,10 @@ pub fn clear_pending_exception(env: &mut jni::JNIEnv) -> bool {
     pending
 }
 
+/// Local references reserved for one helper call; the VM grows the frame
+/// when a call needs more.
+const LOCAL_FRAME_CAPACITY: i32 = 16;
+
 /// Run `f` with the retained Application Context. Returns `None` before either
 /// foreground or headless bootstrap, without calling ndk-context's panicking
 /// accessor, and when the call failed or left a Java exception (cleared).
@@ -67,7 +71,12 @@ pub fn with_app_context<R>(
 ) -> Option<R> {
     let (vm, context) = APP_CONTEXT.get()?;
     let mut guard = vm.attach_current_thread().ok()?;
-    let result = f(&mut guard, context.as_obj().as_raw());
+    // On a thread that is already attached the guard frees nothing, so every
+    // local reference the closure makes would stay pinned for the thread's
+    // life. A local frame releases them when the call returns.
+    let result = guard.with_local_frame(LOCAL_FRAME_CAPACITY, |env| {
+        f(env, context.as_obj().as_raw())
+    });
     let pending_exception = clear_pending_exception(&mut guard);
     match result {
         Ok(value) if !pending_exception => Some(value),
@@ -89,7 +98,9 @@ pub fn call(
 ) -> Result<(), String> {
     let (vm, context) = APP_CONTEXT.get().ok_or("Android context unavailable")?;
     let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
-    let result = f(&mut env, context.as_obj()).map_err(|e| e.to_string());
+    let result = env
+        .with_local_frame(LOCAL_FRAME_CAPACITY, |env| f(env, context.as_obj()))
+        .map_err(|e| e.to_string());
     // Never leave a pending Java exception attached to an event-loop thread.
     clear_pending_exception(&mut env);
     result
