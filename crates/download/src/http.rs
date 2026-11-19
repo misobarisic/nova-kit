@@ -49,7 +49,7 @@ pub fn new_http_client() -> Result<Client, DownloadError> {
 /// Probe a bounded single-resource total without starting a media transfer.
 /// A playlist's own Content-Length never describes its offline bundle.
 pub fn probe_http_size(url: &str, headers: &[(String, String)]) -> Option<u64> {
-    if super::is_manifest_url(url) || super::validate_download_url(url).is_err() {
+    if super::validate_download_url(url).is_err() {
         return None;
     }
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -66,16 +66,31 @@ pub fn probe_http_size(url: &str, headers: &[(String, String)]) -> Option<u64> {
             request = request.header(name, value);
         }
         let response = request.send().await.ok()?.error_for_status().ok()?;
-        if response
+        let content_type = response
             .headers()
             .get("content-type")
             .and_then(|v| v.to_str().ok())
-            .is_some_and(is_manifest_content_type)
+            .unwrap_or_default();
+        if is_manifest_content_type(content_type)
+            || (!is_direct_media_type(content_type) && is_manifest_url(response.url().as_str()))
         {
             return None;
         }
-        response.content_length().filter(|bytes| *bytes > 0)
+        head_content_length(response.headers())
     })
+}
+
+/// The resource size a HEAD response declares. `Response::content_length`
+/// reports the (empty) HEAD body over HTTP/1.1, so read the header itself.
+fn head_content_length(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|bytes| *bytes > 0)
 }
 
 pub async fn download_http<F>(
@@ -283,11 +298,23 @@ where
         )
         .await?;
         let final_url = response.url().to_string();
-        if is_unsupported_download_url(&final_url) {
+        let content_type = header_string(response.headers(), "content-type").unwrap_or_default();
+        // A server that names a media type is believed over the URL's shape:
+        // `/hls/movie.mp4` or `?playlist=0` can still be a plain file.
+        let media = is_direct_media_type(&content_type);
+        if !media && is_unsupported_download_url(&final_url) {
             return Err(DownloadError::UnsupportedUrl(final_url));
         }
-        let content_type = header_string(response.headers(), "content-type").unwrap_or_default();
-        if is_manifest_url(&final_url) || content_type.to_ascii_lowercase().contains("mpegurl") {
+        if content_type.to_ascii_lowercase().contains("mpegurl")
+            || (!media && is_manifest_url(&final_url))
+        {
+            if !response.status().is_success() {
+                let status = response.status();
+                return Err(DownloadError::HttpStatus {
+                    status: status.as_u16(),
+                    message: status.canonical_reason().unwrap_or("request failed").into(),
+                });
+            }
             if private_source {
                 return Err(DownloadError::UnsupportedContentType(
                     "private HLS download".into(),
@@ -977,8 +1004,20 @@ pub fn is_manifest_content_type(content_type: &str) -> bool {
             | "text/manifest"
             | "application/vnd.youtube"
             | "application/x-youtube"
-            | "video/mp2t"
     )
+}
+
+/// A response that declares itself audio or video (MPEG-TS included) rather
+/// than a playlist, whatever its URL looks like.
+fn is_direct_media_type(content_type: &str) -> bool {
+    let essence = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    (essence.starts_with("video/") || essence.starts_with("audio/"))
+        && !is_manifest_content_type(&essence)
 }
 
 pub fn is_manifest_url(url: &str) -> bool {
@@ -1045,7 +1084,6 @@ pub(super) fn is_unsupported_download_url(url: &str) -> bool {
         || [".mpd", ".ism", ".isml", ".f4m"]
             .iter()
             .any(|ext| path.ends_with(ext))
-        || path.split('/').any(|segment| segment == "dash")
 }
 
 #[cfg(test)]
@@ -1055,6 +1093,21 @@ mod tests {
 
     use super::*;
     use crate::{format_bytes, sanitize_filename};
+
+    #[test]
+    fn head_probe_reads_the_declared_length_not_the_empty_body() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        assert_eq!(head_content_length(&headers), None);
+        headers.insert(
+            reqwest::header::CONTENT_LENGTH,
+            "734003200".parse().unwrap(),
+        );
+        assert_eq!(head_content_length(&headers), Some(734_003_200));
+        headers.insert(reqwest::header::CONTENT_LENGTH, "0".parse().unwrap());
+        assert_eq!(head_content_length(&headers), None);
+        headers.insert(reqwest::header::CONTENT_LENGTH, "lots".parse().unwrap());
+        assert_eq!(head_content_length(&headers), None);
+    }
 
     #[test]
     fn retry_after_accepts_seconds_dates_and_elapsed_deadlines() {
@@ -1525,6 +1578,14 @@ mod tests {
             "application/dash+xml; charset=utf-8"
         ));
         assert!(!is_manifest_content_type("video/mp4"));
+        // Plain files under playlist-looking paths, and MPEG-TS files.
+        assert!(!is_manifest_content_type("video/mp2t"));
+        assert!(is_direct_media_type("video/MP2T"));
+        assert!(is_direct_media_type("video/mp4; codecs=avc1"));
+        assert!(!is_direct_media_type("audio/x-mpegurl"));
+        assert!(!is_direct_media_type("application/octet-stream"));
+        assert!(!is_unsupported_download_url("https://host/dash/movie.mp4"));
+        assert!(is_unsupported_download_url("https://host/movie.mpd"));
         assert_eq!(sanitize_filename("a/b:c?.mp4"), "b_c_.mp4");
         assert_eq!(format_bytes(1024), "1.0 KiB");
     }
