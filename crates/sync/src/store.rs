@@ -825,7 +825,21 @@ impl Store {
                 keep
             });
         }
-        self.domains.retain(|_, keys| !keys.is_empty());
+        let pending = &mut self.pending_domains;
+        let mut cleared = false;
+        self.domains.retain(|domain, keys| {
+            if !keys.is_empty() {
+                return true;
+            }
+            // An absent domain never matches a projection basis, so a marker
+            // left on a domain this pass emptied could never be cleared and
+            // would replay its projection on every attach and restart.
+            cleared |= pending.remove(domain);
+            false
+        });
+        if cleared {
+            self.clock_dirty = true;
+        }
         // Receipts at or below the floor (or for rows that are gone or live
         // again) no longer hold anything back.
         let before = self.receipts.values().map(BTreeMap::len).sum::<usize>();
@@ -1580,6 +1594,21 @@ mod tests {
         // Older than the TTL and every peer acked at/after it, so it can go.
         s.gc(now, TOMBSTONE_TTL_MS, AckFloor::At(version.hlc()));
         assert!(s.domains().is_empty());
+    }
+
+    #[test]
+    fn gc_clears_the_pending_marker_of_a_domain_it_empties() {
+        let mut s = Store::default();
+        s.set("d", "k", Some("v".into()), 0, DEV_A);
+        s.set("d", "k", None, 0, DEV_A);
+        s.mark_pending("d");
+        s.mark_pending("other");
+        let version = s.digest()["d"]["k"];
+        let now = version.ts + TOMBSTONE_TTL_MS + 1;
+        s.gc(now, TOMBSTONE_TTL_MS, AckFloor::At(version.hlc()));
+        // "d" can never match a projection basis again; "other" was never
+        // present, so its marker is not this pass's to clear.
+        assert_eq!(s.pending_domains(), ["other"]);
     }
 
     #[test]
