@@ -2830,3 +2830,32 @@ fn core06_symlink_retargeting_or_unsupported_identity_uses_full_validation() {
     }
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn oversized_canvases_are_refused_before_decoding() {
+    let png = |width, height| {
+        let mut encoded = Vec::new();
+        image::RgbImage::new(width, height)
+            .write_to(
+                &mut std::io::Cursor::new(&mut encoded),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        encoded
+    };
+    let bounds = nova_image::DecodeLimits {
+        max_encoded_bytes: 1024 * 1024,
+        max_width: 64,
+        max_height: 64,
+        max_pixels: 1000,
+        max_decoded_bytes: 1024 * 1024,
+    };
+    // Too wide, and too many pixels within the side limits.
+    assert!(decode_bounded(&png(65, 1), bounds).is_err());
+    assert!(decode_bounded(&png(40, 40), bounds).is_err());
+    let fits = decode_bounded(&png(30, 30), bounds).unwrap();
+    assert_eq!((fits.width(), fits.height()), (30, 30));
+    // The public path keeps decoding ordinary posters.
+    let pixels = decode_image_bytes(&png(300, 450)).unwrap();
+    assert_eq!((pixels.width(), pixels.height()), (300, 450));
+}

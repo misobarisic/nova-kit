@@ -416,8 +416,35 @@ fn decode_source(
             nova_image::DecodeLimits::default(),
         )?))
     } else {
-        Ok(image::load_from_memory(bytes)?)
+        decode_bounded(bytes, nova_image::DecodeLimits::default())
     }
+}
+
+/// Decode PNG/JPEG/WebP under the same bounds as JPEG XL and AVIF. A tiny
+/// solid-colour PNG can declare a huge canvas, and the crate's only default
+/// bound is a 512 MiB allocation with no dimension cap.
+fn decode_bounded(
+    bytes: &[u8],
+    bounds: nova_image::DecodeLimits,
+) -> Result<image::DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
+    if bytes.len() > bounds.max_encoded_bytes {
+        return Err("image file exceeds the size limit".into());
+    }
+    let reader = || image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format();
+    let (width, height) = reader()?.into_dimensions()?;
+    if width > bounds.max_width
+        || height > bounds.max_height
+        || u64::from(width) * u64::from(height) > bounds.max_pixels
+    {
+        return Err(format!("image dimensions {width}x{height} exceed the limit").into());
+    }
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(bounds.max_width);
+    limits.max_image_height = Some(bounds.max_height);
+    limits.max_alloc = Some(bounds.max_decoded_bytes);
+    let mut reader = reader()?;
+    reader.limits(limits);
+    Ok(reader.decode()?)
 }
 pub fn downscale_for_display(pixels: &Pixels, max_side: u32) -> Pixels {
     if max_side == 0 || pixels.width().max(pixels.height()) <= max_side {
