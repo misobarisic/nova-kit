@@ -2267,10 +2267,11 @@ fn peer_upsert(
 /// the adder and devices that learn the peer via sync compute the same order
 /// from the synced `added_at`.
 fn ordered_peer_ids(store: &Store, self_id: &str) -> Vec<String> {
+    let severed = store.severed();
     let mut entries: Vec<(String, u64)> = store
         .records(DOMAIN_PEERS)
         .into_iter()
-        .filter(|(id, _)| id != self_id)
+        .filter(|(id, _)| id != self_id && !severed.contains(id))
         .map(|(id, value)| {
             let added_at = serde_json::from_str::<PeerValue>(&value)
                 .map(|p| p.added_at)
@@ -2300,7 +2301,8 @@ pub(crate) fn peers_add(
 ) -> Result<()> {
     let ts = now_secs();
     let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
-    let changed = peer_upsert(&mut store, id, name, ts, dev, true, true);
+    let unsevered = store.set_severed(id, false);
+    let changed = peer_upsert(&mut store, id, name, ts, dev, true, true) || unsevered;
     if changed {
         store.save()?;
         tracing::debug!(peer = short_id(id), "peer added or updated");
@@ -2333,7 +2335,7 @@ pub(crate) fn peers_refresh(
     }
     // A peer we are syncing with is live by construction; make sure the
     // allowlist agrees (defensive against a missed reconcile).
-    let live = read_peer_value(&store, id).is_some();
+    let live = read_peer_value(&store, id).is_some() && !store.severed().contains(id);
     let mut list = peers.lock().unwrap_or_else(|e| e.into_inner());
     if live && !list.iter().any(|p| p == id) {
         list.push(id.to_string());
@@ -2349,7 +2351,8 @@ pub(crate) fn peers_remove(
 ) {
     let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
     let now = now_secs();
-    let mut changed = store.set(DOMAIN_PEERS, id, None, now, dev);
+    let mut changed = store.set_severed(id, false);
+    changed |= store.set(DOMAIN_PEERS, id, None, now, dev);
     // Drop mesh presence observations involving the removed peer (as
     // observer or subject), so orphan sightings don't linger: the
     // tombstones replicate like any other removal.
@@ -2375,6 +2378,60 @@ pub(crate) fn peers_remove(
     }
     let mut list = peers.lock().unwrap_or_else(|e| e.into_inner());
     list.retain(|p| p != id);
+}
+
+// Severed peers: ones this device stopped trusting because they removed or
+// refused us. Kept outside the synced `peers` domain: a removed device must
+// never replicate a tombstone of its remover, or that tombstone can reach a
+// third device first and evict the healthy remover from the mesh.
+
+/// Stop syncing with a peer that removed or refused us, on this device only.
+/// Returns true when the peer was newly severed.
+pub(crate) fn peers_sever(
+    store: &Arc<Mutex<Store>>,
+    peers: &Arc<Mutex<Vec<String>>>,
+    id: &str,
+) -> bool {
+    let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
+    let changed = store.set_severed(id, true);
+    if changed {
+        if let Err(e) = store.save() {
+            nova_storage::report(nova_storage::Error::new(
+                nova_storage::ErrorKind::Transaction,
+                e,
+            ));
+        }
+        tracing::info!(peer = short_id(id), "peer severed locally");
+    }
+    peers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|p| p != id);
+    changed
+}
+
+/// A severed peer that dials us accepts us again (a refusal can be stale while
+/// a new grant is still spreading). Restore it when its membership record is
+/// live; returns true when the allowlist gained it.
+pub(crate) fn peers_unsever_live(
+    store: &Arc<Mutex<Store>>,
+    peers: &Arc<Mutex<Vec<String>>>,
+    id: &str,
+    self_id: &str,
+) -> bool {
+    let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
+    if read_peer_value(&store, id).is_none() || !store.set_severed(id, false) {
+        return false;
+    }
+    if let Err(e) = store.save() {
+        nova_storage::report(nova_storage::Error::new(
+            nova_storage::ErrorKind::Transaction,
+            e,
+        ));
+    }
+    tracing::info!(peer = short_id(id), "severed peer reconnected; restored");
+    *peers.lock().unwrap_or_else(|e| e.into_inner()) = ordered_peer_ids(&store, self_id);
+    true
 }
 
 /// Rebuild the live allowlist from the merged `peers` domain after a sync,

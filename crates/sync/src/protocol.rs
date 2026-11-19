@@ -310,24 +310,29 @@ impl Handler {
         crate::peers_add(&self.store, &self.peers, id, Some(name), self.device)
     }
 
-    /// Drop a peer locally, tombstoning it so the removal replicates.
-    pub(crate) fn drop_peer(&self, id: &str) {
-        crate::peers_remove(&self.store, &self.peers, id, self.device);
+    /// Stop syncing with a peer that removed us, on this device only. This is
+    /// never a replicated tombstone: the removed (possibly lost) device must
+    /// not be able to evict its remover from the rest of the mesh. Returns
+    /// true when the peer was newly severed.
+    pub(crate) fn sever_peer(&self, id: &str) -> bool {
+        crate::peers_sever(&self.store, &self.peers, id)
     }
 
-    /// The remote refused us as a peer ("not a peer"): it removed us (or we
-    /// removed it earlier). Drop it and leave a UI notice so the removed side
-    /// does not keep retrying a peer that will never accept it.
+    /// The remote refused us as a peer ("not a peer"): it removed us, or has
+    /// not yet heard of a newer grant. Sever it locally and leave a UI notice
+    /// so the removed side does not keep retrying; it is restored if it later
+    /// dials us or the user pairs with it again.
     pub(crate) fn note_rejected(&self, id: &str) {
         let name = crate::peer_names_from_store(&self.store)
             .remove(id)
             .unwrap_or_default();
         tracing::info!(
             peer = crate::short_id(id),
-            "peer revoked our authorization; dropping it"
+            "peer revoked our authorization; severing it"
         );
-        self.drop_peer(id);
-        self.set_removed_notice(name);
+        if self.sever_peer(id) {
+            self.set_removed_notice(name);
+        }
         self.emit_remote(vec![crate::DOMAIN_PEERS.to_string()]);
     }
 
@@ -399,6 +404,11 @@ impl Handler {
 impl ProtocolHandler for Handler {
     async fn accept(&self, conn: Connection) -> Result<(), iroh::protocol::AcceptError> {
         let remote = conn.remote_id().to_string();
+        if !self.is_peer(&remote)
+            && crate::peers_unsever_live(&self.store, &self.peers, &remote, &self.self_id)
+        {
+            self.emit_remote(vec![crate::DOMAIN_PEERS.to_string()]);
+        }
         if !self.is_peer(&remote) {
             let removed = self
                 .store()
@@ -766,9 +776,9 @@ async fn exchange(
     if removed_us {
         tracing::info!(
             peer = crate::short_id(remote_id),
-            "peer removed us; dropping it"
+            "peer removed us; severing it"
         );
-        handler.drop_peer(remote_id);
+        handler.sever_peer(remote_id);
         handler.set_removed_notice(peer_name.clone());
         if !changed.iter().any(|d| d == crate::DOMAIN_PEERS) {
             changed.push(crate::DOMAIN_PEERS.to_string());
@@ -1010,7 +1020,7 @@ impl ProtocolHandler for RemoveHandler {
                 bail!("unsupported removal protocol {}", notice.proto);
             }
             tracing::info!(peer = crate::short_id(&remote), "peer removed us");
-            self.handler.drop_peer(&remote);
+            self.handler.sever_peer(&remote);
             self.handler.set_removed_notice(notice.name);
             self.handler.reconcile_peers();
             self.handler
@@ -1359,7 +1369,7 @@ mod tests {
             .await
             .unwrap();
             if let Some((handler, id)) = &self.revoke {
-                handler.drop_peer(id);
+                crate::peers_remove(&handler.store, &handler.peers, id, handler.device);
             }
             if self.after_done {
                 frame::write_frame_c(&mut send, &Wire::Done).await.unwrap();
@@ -2375,6 +2385,15 @@ mod tests {
             Some("Alice"),
             "B should surface a removal notice"
         );
+        // The counter-removal is local: B holds no tombstone for A that could
+        // replicate to a third device and evict A from the mesh.
+        assert!(
+            b_store
+                .lock()
+                .unwrap()
+                .record(crate::DOMAIN_PEERS, &aid)
+                .is_some_and(|r| !r.is_deleted())
+        );
     }
 
     #[test]
@@ -2397,5 +2416,32 @@ mod tests {
                 .contains(&"peer-x".to_string())
         );
         assert_eq!(handler.take_removed_notice().as_deref(), Some("X"));
+        // Local only: no replicating tombstone, and a repeat refusal does not
+        // raise the notice again.
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .record(crate::DOMAIN_PEERS, "peer-x")
+                .is_some_and(|r| !r.is_deleted())
+        );
+        handler.note_rejected("peer-x");
+        assert_eq!(handler.take_removed_notice(), None);
+        assert!(!handler.reconcile_peers());
+
+        // The refusal may have been stale: a dial from that peer restores it.
+        assert!(crate::peers_unsever_live(
+            &store,
+            &handler.peers,
+            "peer-x",
+            "self"
+        ));
+        assert!(handler.peers.lock().unwrap().contains(&"peer-x".into()));
+
+        // An explicit re-pair also lifts a severance.
+        handler.note_rejected("peer-x");
+        handler.add_peer_explicit("peer-x", "X").unwrap();
+        assert!(handler.peers.lock().unwrap().contains(&"peer-x".into()));
+        assert!(!handler.reconcile_peers());
     }
 }

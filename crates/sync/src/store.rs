@@ -84,7 +84,14 @@ pub struct Store {
     clock_dirty: bool,
     #[serde(skip)]
     device: Option<u64>,
+    /// Peers this device stopped trusting locally (see `crate::peers_sever`).
+    /// Persisted under [`SEVERED_KEY`], never replicated.
+    #[serde(skip)]
+    severed: BTreeSet<String>,
 }
+
+/// Local-only set of severed peer ids (JSON array).
+const SEVERED_KEY: &str = "sync:severed";
 
 impl Store {
     /// Load from the KV store (empty when absent).
@@ -114,6 +121,14 @@ impl Store {
     }
 
     pub fn try_load() -> Result<Self> {
+        let mut store = Self::try_load_records()?;
+        if let Some(raw) = nova_storage::try_get_str(SEVERED_KEY)? {
+            store.severed = serde_json::from_str(&raw).unwrap_or_default();
+        }
+        Ok(store)
+    }
+
+    fn try_load_records() -> Result<Self> {
         let _ = crate::configuration::protocol();
         let _ = crate::policy::policy();
         if let Some(raw) = nova_storage::try_get_str(LEGACY_RECORDS_KEY)? {
@@ -371,6 +386,27 @@ impl Store {
     /// even when preparing the same snapshot no longer changes memory.
     pub fn has_dirty_records(&self) -> bool {
         !self.dirty.is_empty()
+    }
+
+    /// Peers severed on this device only.
+    pub(crate) fn severed(&self) -> &BTreeSet<String> {
+        &self.severed
+    }
+
+    /// Sever or restore a peer locally, queuing the change for the next save.
+    /// Returns true when the set changed.
+    pub(crate) fn set_severed(&mut self, id: &str, severed: bool) -> bool {
+        let changed = if severed {
+            self.severed.insert(id.to_string())
+        } else {
+            self.severed.remove(id)
+        };
+        if changed {
+            let value = (!self.severed.is_empty())
+                .then(|| serde_json::to_string(&self.severed).expect("severed peers serialize"));
+            self.queue_extra(SEVERED_KEY, value);
+        }
+        changed
     }
 
     pub fn queue_extra(&mut self, key: &str, value: Option<String>) {
