@@ -122,12 +122,48 @@ pub fn replace_domain(
     domain: &str,
     records: &[(String, String, u64)],
 ) -> Result<bool> {
-    let live: BTreeMap<String, String> = store.records(domain).into_iter().collect();
+    let incoming: BTreeMap<&str, &str> = records
+        .iter()
+        .map(|(key, value, _)| (key.as_str(), value.as_str()))
+        .collect();
+    // A live record equal to the restored one, ignoring key order and the
+    // stored progress registers, is not an edit: seeding the baseline with the
+    // incoming text leaves it untouched instead of restamping it (for
+    // progress, as a fresh watch action that would beat a newer unwatch).
+    let live: BTreeMap<String, String> = store
+        .records(domain)
+        .into_iter()
+        .map(|(key, value)| {
+            let value = match incoming.get(key.as_str()) {
+                Some(new) if same_record(domain, &value, new) => (*new).to_owned(),
+                _ => value,
+            };
+            (key, value)
+        })
+        .collect();
     store.queue_extra(
         &format!("sync:baseline:{domain}"),
         Some(serde_json::to_string(&live)?),
     );
     prepare_snapshot(store, dev, domain, records, None, false, false)
+}
+
+fn same_record(domain: &str, stored: &str, incoming: &str) -> bool {
+    if stored == incoming {
+        return true;
+    }
+    let stored = if crate::is_progress_domain(domain) {
+        crate::progress::local_input(stored.to_owned())
+    } else {
+        stored.to_owned()
+    };
+    match (
+        serde_json::from_str::<serde_json::Value>(&stored),
+        serde_json::from_str::<serde_json::Value>(incoming),
+    ) {
+        (Ok(stored), Ok(incoming)) => stored == incoming,
+        _ => false,
+    }
 }
 
 /// Publish a staged copy of the live store: run `commit` (normally a durable
@@ -252,6 +288,34 @@ mod tests {
         assert!(store.record(&domain, "credentials").is_none());
         assert!(store.extra_value(&baseline).unwrap().is_none());
         assert!(store.extra_value(snapshot).unwrap().is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "nova-progress")]
+    fn restoring_identical_progress_keeps_its_versions() {
+        let mut store = Store::default();
+        store.queue_extra("sync:baseline:progress", Some("{}".into()));
+        let typed = serde_json::json!({
+            "watched": true, "unwatched_at_secs": 0, "position_secs": 0,
+            "duration_secs": 100, "updated_at_secs": 1, "play_count": 1
+        })
+        .to_string();
+        let rows = [("ep".to_string(), typed.clone(), 0)];
+        prepare_snapshot(&mut store, 1, "progress", &rows, None, false, false).unwrap();
+        let before = store.record("progress", "ep").unwrap().clone();
+        assert!(
+            before
+                .value
+                .as_deref()
+                .unwrap()
+                .contains("__nova_progress_v1")
+        );
+        // A backup of the same state, serialized with a different key order.
+        let reordered = r#"{"play_count":1,"updated_at_secs":1,"duration_secs":100,"position_secs":0,"unwatched_at_secs":0,"watched":true}"#.to_string();
+        assert_ne!(reordered, typed);
+        let restored = [("ep".to_string(), reordered, 0)];
+        assert!(!replace_domain(&mut store, 1, "progress", &restored).unwrap());
+        assert_eq!(store.record("progress", "ep").unwrap(), &before);
     }
 
     #[test]
