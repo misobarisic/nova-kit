@@ -163,12 +163,15 @@ pub fn encode_with_packages(
 pub struct Writer<W: Write + Seek> {
     zip: zip::ZipWriter<W>,
     total: u64,
+    /// Streamed blob entries so far, bounded like the reader's [`MAX_BLOBS`].
+    blobs: usize,
 }
 impl<W: Write + Seek> Writer<W> {
     pub fn new(out: W) -> Self {
         Self {
             zip: zip::ZipWriter::new(out),
             total: 0,
+            blobs: 0,
         }
     }
     fn options() -> zip::write::SimpleFileOptions {
@@ -239,6 +242,11 @@ impl<W: Write + Seek> Writer<W> {
         self.zip.write_all(&bytes).map_err(|e| e.to_string())
     }
     pub fn package(&mut self, package: &Package, bytes: &[u8]) -> Result<(), String> {
+        // The reader refuses a larger entry, so refuse to write one: an export
+        // must never report success for an archive that cannot be restored.
+        if bytes.len() as u64 > MAX_FILE {
+            return Err("Addon package exceeds the backup size limit".into());
+        }
         self.budget(bytes.len() as u64)?;
         self.zip
             .start_file(&package.path, Self::options())
@@ -252,6 +260,10 @@ impl<W: Write + Seek> Writer<W> {
         if !path.starts_with(BLOB_PREFIX) || !bounded::strict_path(path) {
             return Err("Invalid backup file path".into());
         }
+        if self.blobs >= MAX_BLOBS {
+            return Err("Too many backup files".into());
+        }
+        self.blobs += 1;
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored)
             .large_file(true);
@@ -281,12 +293,16 @@ impl<W: Write + Seek> Writer<W> {
     }
     /// Write `manifest.json` and close the archive, returning the output.
     pub fn finish(mut self, manifest: &Manifest) -> Result<W, String> {
+        let bytes = serde_json::to_vec_pretty(manifest).map_err(|e| e.to_string())?;
+        // The reader counts the manifest against the same limits.
+        if bytes.len() as u64 > MAX_FILE {
+            return Err("Backup manifest exceeds the size limit".into());
+        }
+        self.budget(bytes.len() as u64)?;
         self.zip
             .start_file("manifest.json", Self::options())
             .map_err(|e| e.to_string())?;
-        self.zip
-            .write_all(&serde_json::to_vec_pretty(manifest).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+        self.zip.write_all(&bytes).map_err(|e| e.to_string())?;
         self.zip.finish().map_err(|e| e.to_string())
     }
 }
