@@ -489,7 +489,16 @@ fn is_disconnect(err: &anyhow::Error) -> bool {
         || text.contains("stopped")
 }
 
+/// Uncompressed size one records frame aims to stay under, well below
+/// [`frame::MAX_FRAME`] so a large domain (a long-time library with its
+/// tombstones) splits across frames instead of failing every pass.
+const RECORDS_FRAME_BUDGET: usize = frame::MAX_FRAME / 4;
+
 fn outbound_frames(store: &Store, peer: &Digest) -> Vec<Wire> {
+    outbound_frames_within(store, peer, RECORDS_FRAME_BUDGET)
+}
+
+fn outbound_frames_within(store: &Store, peer: &Digest, budget: usize) -> Vec<Wire> {
     let mut by_domain: BTreeMap<String, Vec<WireRecord>> = BTreeMap::new();
     for out in store.outbound(peer) {
         by_domain
@@ -497,10 +506,31 @@ fn outbound_frames(store: &Store, peer: &Digest) -> Vec<Wire> {
             .or_default()
             .push(WireRecord::from(&out));
     }
-    by_domain
-        .into_iter()
-        .map(|(domain, entries)| Wire::Records { domain, entries })
-        .collect()
+    let mut frames = Vec::new();
+    for (domain, entries) in by_domain {
+        let mut chunk = Vec::new();
+        let mut size = 0usize;
+        for entry in entries {
+            // Postcard: length-prefixed strings plus a few varints.
+            let estimate = entry.key.len() + entry.value.as_ref().map_or(0, String::len) + 32;
+            if !chunk.is_empty() && size + estimate > budget {
+                frames.push(Wire::Records {
+                    domain: domain.clone(),
+                    entries: std::mem::take(&mut chunk),
+                });
+                size = 0;
+            }
+            size += estimate;
+            chunk.push(entry);
+        }
+        if !chunk.is_empty() {
+            frames.push(Wire::Records {
+                domain,
+                entries: chunk,
+            });
+        }
+    }
+    frames
 }
 
 /// Result of applying a peer's frames.
@@ -821,17 +851,15 @@ async fn exchange(
     // Frames + `Done` written without error. Fires before we block on the
     // peer's end, so the responder can ack without waiting for its own finish.
     let written = written_rx.await.is_ok();
-    let acked = if initiator {
+    let (acked, sent) = if initiator {
         let _ = finish_tx.send(());
         let ended = matches!(
             tokio::time::timeout(EXCHANGE_TIMEOUT, wait_for_end(&mut recv)).await,
             Ok(true)
         );
-        let finished = matches!(
-            tokio::time::timeout(EXCHANGE_TIMEOUT, writer.join()).await,
-            Ok(Ok(()))
-        );
-        written && ended && finished
+        let finished = join_writer(&mut writer).await;
+        let acked = written && ended && finished.is_ok();
+        (acked, finished)
     } else {
         let ended = matches!(
             tokio::time::timeout(EXCHANGE_TIMEOUT, wait_for_end(&mut recv)).await,
@@ -843,11 +871,8 @@ async fn exchange(
         }
         // Release our stream end now that the ack (if earned) is recorded.
         let _ = finish_tx.send(());
-        let finished = matches!(
-            tokio::time::timeout(EXCHANGE_TIMEOUT, writer.join()).await,
-            Ok(Ok(()))
-        );
-        ok && finished
+        let finished = join_writer(&mut writer).await;
+        (ok && finished.is_ok(), finished)
     };
     if acked {
         if initiator {
@@ -862,8 +887,20 @@ async fn exchange(
         }
     }
 
-    anyhow::ensure!(acked, "sync completion handshake failed");
+    if !acked {
+        // The writer's own failure (such as an oversized frame) is the real
+        // cause; without it both sides only see the handshake fail.
+        sent.context("sending records")?;
+        bail!("sync completion handshake failed");
+    }
     Ok(())
+}
+
+/// Wait for the record writer, bounded like the rest of the close handshake.
+async fn join_writer(writer: &mut WriterTask) -> Result<()> {
+    tokio::time::timeout(EXCHANGE_TIMEOUT, writer.join())
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("record writer timed out")))
 }
 
 /// Read a `Wire::Digest` frame (the peer's changed-domain version maps).
@@ -1055,6 +1092,36 @@ impl ProtocolHandler for RemoveHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_domains_split_across_record_frames() {
+        let mut store = Store::default();
+        for i in 0..10 {
+            store.set("big", &format!("k{i}"), Some("x".repeat(100)), 0, 1);
+        }
+        store.set("small", "only", Some("y".into()), 0, 1);
+        // About 3 records fit under this budget.
+        let frames = outbound_frames_within(&store, &Digest::new(), 450);
+        let mut big = Vec::new();
+        for frame in &frames {
+            let Wire::Records { domain, entries } = frame else {
+                panic!("only record frames");
+            };
+            if domain == "big" {
+                assert!(entries.len() <= 3);
+                big.extend(entries.iter().map(|e| e.key.clone()));
+            } else {
+                assert_eq!(entries.len(), 1);
+            }
+        }
+        big.sort();
+        let mut expected: Vec<_> = (0..10).map(|i| format!("k{i}")).collect();
+        expected.sort();
+        assert_eq!(big, expected);
+        assert!(frames.len() >= 5);
+        // The default budget keeps one frame per domain for ordinary sizes.
+        assert_eq!(outbound_frames(&store, &Digest::new()).len(), 2);
+    }
 
     fn seeded(domain: &str, key: &str, value: &str, dev: u64) -> Arc<Mutex<Store>> {
         let store = Arc::new(Mutex::new(Store::default()));
