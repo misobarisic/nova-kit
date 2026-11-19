@@ -358,8 +358,15 @@ where
             {
                 return Err(invalid("Incomplete HLS segment or key"));
             }
+            // `sync_all` does not report a failed background write, so the last
+            // chunk's error (a full disk) surfaces only through `flush`. The
+            // on-disk length must also match before the segment is committed.
+            file.flush().await?;
             file.sync_all().await?;
             drop(file);
+            if fs::metadata(&part).await?.len() != bytes {
+                return Err(invalid("Incomplete HLS segment or key"));
+            }
             fs::rename(&part, &path).await?;
             fs::write(&marker, format!("{}\n{bytes}", asset.url)).await?;
         }
