@@ -48,8 +48,24 @@ pub(crate) async fn write_frame<T: Serialize>(send: &mut SendStream, msg: &T) ->
     Ok(())
 }
 
-/// Read one frame, or `None` when the peer finished the stream cleanly.
-pub(crate) async fn read_frame<T: DeserializeOwned>(recv: &mut RecvStream) -> Result<Option<T>> {
+/// Upper bound for pairing and removal frames, which are a few hundred bytes
+/// and arrive before the peer is trusted (or from a peer that is leaving).
+pub(crate) const MAX_SMALL_FRAME: usize = 64 * 1024;
+
+/// Read one uncompressed frame (pairing and removal), or `None` when the peer
+/// finished the stream cleanly. The length prefix is checked against
+/// [`MAX_SMALL_FRAME`] before anything is allocated, so a stranger cannot
+/// make each connection hold a 32 MiB buffer.
+pub(crate) async fn read_small_frame<T: DeserializeOwned>(
+    recv: &mut RecvStream,
+) -> Result<Option<T>> {
+    read_frame_limited(recv, MAX_SMALL_FRAME).await
+}
+
+async fn read_frame_limited<T: DeserializeOwned>(
+    recv: &mut RecvStream,
+    max: usize,
+) -> Result<Option<T>> {
     let mut len = [0u8; 4];
     match recv.read_exact(&mut len).await {
         Ok(()) => {}
@@ -58,7 +74,7 @@ pub(crate) async fn read_frame<T: DeserializeOwned>(recv: &mut RecvStream) -> Re
         Err(ReadExactError::ReadError(e)) => return Err(e.into()),
     }
     let n = u32::from_be_bytes(len) as usize;
-    if n == 0 || n > MAX_FRAME {
+    if n == 0 || n > max {
         bail!("bad frame length {n}");
     }
     let mut buf = vec![0u8; n];

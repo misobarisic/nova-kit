@@ -1072,7 +1072,7 @@ impl ProtocolHandler for RemoveHandler {
         }
         let result = tokio::time::timeout(REMOVE_TIMEOUT, async {
             let (mut send, mut recv) = conn.accept_bi().await.context("accept remove stream")?;
-            let notice: RemoveNotice = frame::read_frame(&mut recv)
+            let notice: RemoveNotice = frame::read_small_frame(&mut recv)
                 .await?
                 .context("peer closed before removal notice")?;
             if notice.proto != REMOVE_PROTO {

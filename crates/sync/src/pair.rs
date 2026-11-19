@@ -264,10 +264,18 @@ impl ProtocolHandler for PairHandler {
 }
 
 async fn handle_incoming(conn: Connection, handler: &PairHandler) -> Result<()> {
-    let (mut send, mut recv) = conn.accept_bi().await.context("accept pairing stream")?;
-    let frame: Wire = frame::read_frame(&mut recv)
-        .await?
-        .context("peer closed before pairing request")?;
+    // The request itself must arrive promptly: only four slots exist, and the
+    // overall 90 s budget is for the user's confirmation, not idle strangers.
+    // `_recv` keeps the receive side open until the reply is sent.
+    let (mut send, _recv, frame) = tokio::time::timeout(Duration::from_secs(10), async {
+        let (send, mut recv) = conn.accept_bi().await.context("accept pairing stream")?;
+        let frame: Wire = frame::read_small_frame(&mut recv)
+            .await?
+            .context("peer closed before pairing request")?;
+        Ok::<_, anyhow::Error>((send, recv, frame))
+    })
+    .await
+    .unwrap_or_else(|_| Err(anyhow::anyhow!("pairing request timed out")))?;
     let Wire::Request {
         proto,
         secret,
@@ -467,7 +475,7 @@ pub(crate) async fn initiate_with_trust(
     .await?;
     send.finish().context("finish pairing request")?;
 
-    let reply: Wire = frame::read_frame(&mut recv)
+    let reply: Wire = frame::read_small_frame(&mut recv)
         .await?
         .context("the other device closed the pairing")?;
     let result = match reply {
