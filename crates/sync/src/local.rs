@@ -86,8 +86,11 @@ pub fn prepare_snapshot(
         for (key, value, ts) in records {
             let differs = baseline.get(key) != Some(value);
             if (seed && store.record(domain, key).is_none()) || (!seed && differs) {
-                let value = preserve_unknown(
+                // Fields this app wrote last time and omits now were cleared;
+                // only fields it never produced belong to a newer client.
+                let value = preserve_unknown_since(
                     store.record(domain, key).and_then(|r| r.value.as_deref()),
+                    baseline.get(key).map(String::as_str),
                     value,
                 );
                 let value = if crate::is_progress_domain(domain) {
@@ -164,11 +167,27 @@ pub fn stage<T>(live: &mut Store, mutate: impl FnOnce(&mut Store) -> Result<T>) 
 }
 
 /// Typed clients may update known object fields without erasing newer fields.
+///
+/// A field the client clears by omitting it (`skip_serializing_if`) is
+/// indistinguishable from an unknown one here; prefer
+/// [`preserve_unknown_since`] when the client's previous value is known.
 pub fn preserve_unknown(old: Option<&str>, new: &str) -> String {
+    preserve_unknown_since(old, None, new)
+}
+
+/// [`preserve_unknown`], except that fields present in `previous` (the value
+/// this client wrote or materialized last time) are the client's own: when
+/// `new` omits them they were cleared, not unknown, and are dropped.
+pub fn preserve_unknown_since(old: Option<&str>, previous: Option<&str>, new: &str) -> String {
     let old = old.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
     let new_value = serde_json::from_str::<serde_json::Value>(new).ok();
     match (old, new_value) {
         (Some(serde_json::Value::Object(mut old)), Some(serde_json::Value::Object(new))) => {
+            if let Some(serde_json::Value::Object(previous)) =
+                previous.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            {
+                old.retain(|field, _| !previous.contains_key(field));
+            }
             old.extend(new);
             serde_json::Value::Object(old).to_string()
         }
@@ -179,6 +198,34 @@ pub fn preserve_unknown(old: Option<&str>, new: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleared_fields_are_dropped_while_unknown_fields_survive() {
+        let mut store = Store::default();
+        store.queue_extra("sync:baseline:d", Some("{}".into()));
+        // A newer peer wrote a field this client does not know.
+        let remote = r#"{"name":"a","caps":["x"],"future":1}"#;
+        let version = crate::merge::Version::new(1_000, 0, 2, false);
+        assert!(store.apply(
+            "d",
+            "k",
+            crate::merge::Record::present(remote.into(), version)
+        ));
+        // Projection materializes the typed value; the baseline records it.
+        let typed = vec![(
+            "k".to_string(),
+            r#"{"name":"a","caps":["x"]}"#.to_string(),
+            0,
+        )];
+        prepare_snapshot(&mut store, 1, "d", &typed, None, true, false).unwrap();
+        // The user clears `caps`; the typed client omits the empty field.
+        let cleared = vec![("k".to_string(), r#"{"name":"a"}"#.to_string(), 0)];
+        assert!(prepare_snapshot(&mut store, 1, "d", &cleared, None, false, false).unwrap());
+        let stored: serde_json::Value =
+            serde_json::from_str(store.record("d", "k").unwrap().value.as_deref().unwrap())
+                .unwrap();
+        assert_eq!(stored, serde_json::json!({"name": "a", "future": 1}));
+    }
 
     #[test]
     fn retired_profile_snapshots_cannot_recreate_baselines_or_user_snapshots() {

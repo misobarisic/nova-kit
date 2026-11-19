@@ -72,10 +72,18 @@ fn offline_intent_pending_projection_and_baseline_survive_reload() {
     );
 
     // Projection advances only the baseline. A later offline delete is real.
+    // The client materializes its typed view, which cannot hold fields from a
+    // newer version.
     let records: Vec<_> = reloaded
         .records("library")
         .into_iter()
-        .map(|(k, v)| (k, v, 0))
+        .map(|(k, v)| {
+            let mut typed: serde_json::Value = serde_json::from_str(&v).unwrap();
+            if let Some(fields) = typed.as_object_mut() {
+                fields.remove("future_field");
+            }
+            (k, typed.to_string(), 0)
+        })
         .collect();
     commit_snapshot("library", &records, None, true, false).unwrap();
     let basis = owner.lock().unwrap().digest()["library"].clone();

@@ -44,8 +44,8 @@ mod protocol;
 mod store;
 mod ticket;
 pub use local::{
-    commit_snapshot, local_device, local_store, prepare_snapshot, preserve_unknown, publish,
-    replace_domain, stage, stage_with,
+    commit_snapshot, local_device, local_store, prepare_snapshot, preserve_unknown,
+    preserve_unknown_since, publish, replace_domain, stage, stage_with,
 };
 
 pub use hlc::Hlc;
