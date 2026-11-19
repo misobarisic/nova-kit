@@ -577,6 +577,12 @@ impl SyncEngine {
             if migrate_peers(&mut s, &legacy, now, device) {
                 tracing::info!(peer_count = legacy.len(), "migrated legacy peers");
             }
+            // Drop the legacy keys in the same save: re-running the migration
+            // on every start would write a renamed peer's old name back.
+            if !legacy.is_empty() {
+                s.queue_extra(PEERS_KEY, None);
+                s.queue_extra(PEER_NAMES_KEY, None);
+            }
             s.save()?;
         }
 
