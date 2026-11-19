@@ -229,8 +229,17 @@ impl Handler {
         if id == self.self_id {
             return Ok(());
         }
+        let current = self
+            .peers
+            .lock()
+            .map(|peers| peers.clone())
+            .unwrap_or_default();
         if let Ok(mut acks) = self.acks.lock() {
             let mut next = acks.clone();
+            // Forget acks of devices that left the mesh. A device paired again
+            // must count as never-acked until its first full exchange, or GC
+            // keeps collecting tombstones it has not seen.
+            next.retain(|peer, _| peer == id || current.contains(peer));
             let slot = next.entry(id.to_string()).or_insert(at);
             if at.newer_than(*slot) {
                 *slot = at;
