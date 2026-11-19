@@ -328,8 +328,13 @@ pub(super) fn cleared(directory: &Path) {
     if let Some(tracker) = tracker(directory) {
         let mut state = tracker.state.lock().unwrap();
         let epoch = state.epoch.wrapping_add(1);
+        // An empty directory is a complete inventory. Dropping `initialized`
+        // would send every admission to a full directory scan until the next
+        // daily reconcile, since the worker never initializes twice.
+        let initialized = state.initialized;
         *state = State {
             epoch,
+            initialized,
             ..State::default()
         };
     }
