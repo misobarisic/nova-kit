@@ -32,6 +32,14 @@ pub fn is_public_ip(ip: IpAddr) -> bool {
                 return is_public_ip(IpAddr::V4(mapped));
             }
             let segments = ip.segments();
+            // DNS64 on IPv6-only networks synthesizes the NAT64 well-known
+            // prefix (RFC 6052) for IPv4-only hosts; judge the embedded IPv4
+            // address. The local-use 64:ff9b:1::/48 stays refused.
+            if segments[..6] == [0x0064, 0xff9b, 0, 0, 0, 0] {
+                let [a, b] = segments[6].to_be_bytes();
+                let [c, d] = segments[7].to_be_bytes();
+                return is_public_ip(IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d)));
+            }
             (0x2000..=0x3fff).contains(&segments[0])
                 && !ip.is_loopback()
                 && !ip.is_unspecified()
@@ -64,6 +72,17 @@ mod tests {
         ] {
             assert!(public(text), "{text}");
         }
+    }
+
+    #[test]
+    fn nat64_addresses_are_judged_by_their_embedded_ipv4() {
+        assert!(public("64:ff9b::808:808"));
+        assert!(public("64:ff9b::5db8:d822"));
+        for text in ["64:ff9b::7f00:1", "64:ff9b::a00:1", "64:ff9b::c0a8:101"] {
+            assert!(!public(text), "{text}");
+        }
+        // Local-use NAT64 prefix (RFC 8215) stays refused.
+        assert!(!public("64:ff9b:1::808:808"));
     }
 
     #[test]
