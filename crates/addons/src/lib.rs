@@ -255,12 +255,23 @@ impl Addon {
 
     /// URL of `GET /meta/{type}/{id}.json`.
     pub fn meta_url(&self, type_: &str, id: &str) -> String {
-        self.join(&format!("meta/{type_}/{id}.json")).to_string()
+        self.resource_url("meta", type_, id)
     }
 
     /// URL of `GET /stream/{type}/{id}.json`.
     pub fn stream_url(&self, type_: &str, id: &str) -> String {
-        self.join(&format!("stream/{type_}/{id}.json")).to_string()
+        self.resource_url("stream", type_, id)
+    }
+
+    /// Ids are opaque: `/`, `?`, `#`, `%` or `..` in one must stay inside its
+    /// path segment, encoded the way Stremio clients encode them.
+    fn resource_url(&self, resource: &str, type_: &str, id: &str) -> String {
+        self.join(&format!(
+            "{resource}/{}/{}.json",
+            Self::encode_id(type_),
+            Self::encode_id(id)
+        ))
+        .to_string()
     }
 
     /// Subtitle extras identify the selected release, not just the title.
@@ -386,6 +397,34 @@ impl Addon {
     fn encode_segment(value: &str) -> String {
         use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
         utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
+    }
+
+    /// Encode one opaque path segment, leaving characters that are literal in
+    /// a path segment alone so ordinary ids (`tt0944947:1:1`) request exactly
+    /// what they always did.
+    fn encode_id(value: &str) -> String {
+        use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+        const SEGMENT: &AsciiSet = &CONTROLS
+            .add(b' ')
+            .add(b'"')
+            .add(b'#')
+            .add(b'%')
+            .add(b'/')
+            .add(b'<')
+            .add(b'>')
+            .add(b'?')
+            .add(b'[')
+            .add(b'\\')
+            .add(b']')
+            .add(b'^')
+            .add(b'`')
+            .add(b'{')
+            .add(b'|')
+            .add(b'}');
+        // An id cannot be a dot segment (it carries `.json`). URL parsing
+        // treats `%2E%2E` as `..` too, so a bare `..` type cannot be escaped;
+        // it stays on the addon's own host either way.
+        utf8_percent_encode(value, SEGMENT).to_string()
     }
 }
 
@@ -617,6 +656,26 @@ mod tests {
             addon.stream_url("movie", "tt0111161"),
             "https://v3-cinemeta.strem.io/stream/movie/tt0111161.json"
         );
+        // Episode ids keep their literal colons.
+        assert_eq!(
+            addon.stream_url("series", "tt0944947:1:1"),
+            "https://v3-cinemeta.strem.io/stream/series/tt0944947:1:1.json"
+        );
+        // Opaque ids stay one segment: no query, fragment, extra path or
+        // traversal, and `%` is not decoded by the addon twice.
+        for (id, encoded) in [
+            ("a/b+c=", "a%2Fb+c="),
+            ("x?y#z", "x%3Fy%23z"),
+            ("../../admin", "..%2F..%2Fadmin"),
+            ("50%", "50%25"),
+            ("..", ".."),
+        ] {
+            assert_eq!(
+                addon.meta_url("movie", id),
+                format!("https://v3-cinemeta.strem.io/meta/movie/{encoded}.json"),
+                "{id}"
+            );
+        }
     }
 
     #[test]
