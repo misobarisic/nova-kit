@@ -868,6 +868,7 @@ impl SyncEngine {
             secret: hex_encode(&secret),
             created_at: now,
             expires_at: now + pair::INVITE_TTL_SECS,
+            claimed_by: None,
         };
         {
             let mut invites = self.pair.invites.lock().unwrap_or_else(|e| e.into_inner());

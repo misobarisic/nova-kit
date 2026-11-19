@@ -43,6 +43,11 @@ pub struct Invite {
     pub secret: String,
     pub created_at: u64,
     pub expires_at: u64,
+    /// The joiner this invite was accepted for. It stays usable by that joiner
+    /// alone until the joiner confirms it installed trust, so a reply lost in
+    /// transit can be retried instead of leaving one-sided pairing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_by: Option<String>,
 }
 
 /// A pairing request waiting for the user's decision.
@@ -282,8 +287,8 @@ async fn handle_incoming(conn: Connection, handler: &PairHandler) -> Result<()> 
         .try_into()
         .map_err(|_| anyhow::anyhow!("secret must be 16 bytes"))?;
 
-    let invite = find_invite(&handler.invites, &secret, crate::now_secs());
-    let Some(invite_id) = invite else {
+    let invite = find_invite(&handler.invites, &secret, crate::now_secs(), &joiner_id);
+    let Some((invite_id, claimed)) = invite else {
         frame::write_frame(
             &mut send,
             &Wire::Rejected {
@@ -299,7 +304,8 @@ async fn handle_incoming(conn: Connection, handler: &PairHandler) -> Result<()> 
     let settings = crate::read_settings();
     let code = match_code(&secret, &handler.host_id, &joiner_id);
 
-    let accepted = if settings.require_confirmation {
+    // A retry of an accepted pairing was already confirmed by the user.
+    let accepted = if settings.require_confirmation && !claimed {
         handler.ask_user(&joiner_id, &name, &code).await
     } else {
         true
@@ -317,21 +323,21 @@ async fn handle_incoming(conn: Connection, handler: &PairHandler) -> Result<()> 
         return Ok(());
     }
 
-    // Invite consumption and trust commit atomically. A second simultaneous
-    // request cannot spend the same bearer invitation after confirmation.
+    // Invite claim and trust commit atomically. A second simultaneous request
+    // from another device cannot spend the same bearer invitation after
+    // confirmation; the claimed joiner may retry until it confirms.
     {
         let mut invites = handler.invites.lock().unwrap_or_else(|e| e.into_inner());
         anyhow::ensure!(
-            invites
-                .iter()
-                .any(|i| i.id == invite_id && i.expires_at > crate::now_secs()),
+            invites.iter().any(|i| i.id == invite_id
+                && i.expires_at > crate::now_secs()
+                && i.claimed_by.as_ref().is_none_or(|id| *id == joiner_id)),
             "invite already consumed"
         );
-        let next: Vec<_> = invites
-            .iter()
-            .filter(|i| i.id != invite_id)
-            .cloned()
-            .collect();
+        let mut next = invites.clone();
+        for invite in next.iter_mut().filter(|i| i.id == invite_id) {
+            invite.claimed_by = Some(joiner_id.clone());
+        }
         let mut store = handler.store.lock().unwrap_or_else(|e| e.into_inner());
         crate::peer_upsert(
             &mut store,
@@ -368,6 +374,19 @@ async fn handle_incoming(conn: Connection, handler: &PairHandler) -> Result<()> 
         matches!(closed, iroh::endpoint::ConnectionError::ApplicationClosed(ref c) if c.error_code == 0u32.into()),
         "pairing completion was interrupted"
     );
+    // Both sides trust each other now; the invite is spent.
+    {
+        let mut invites = handler.invites.lock().unwrap_or_else(|e| e.into_inner());
+        let next: Vec<_> = invites
+            .iter()
+            .filter(|i| i.id != invite_id)
+            .cloned()
+            .collect();
+        let mut store = handler.store.lock().unwrap_or_else(|e| e.into_inner());
+        store.queue_extra(INVITES_KEY, Some(serde_json::to_string(&next)?));
+        store.save()?;
+        *invites = next;
+    }
     handler.wake_sync();
 
     if let Some(cb) = handler.on_pair.lock().ok().and_then(|c| c.clone()) {
@@ -376,11 +395,18 @@ async fn handle_incoming(conn: Connection, handler: &PairHandler) -> Result<()> 
     Ok(())
 }
 
-fn find_invite(invites: &Arc<Mutex<Vec<Invite>>>, secret: &[u8; 16], now: u64) -> Option<String> {
+/// The live invite matching `secret` that `joiner` may use, and whether it
+/// was already accepted for that joiner.
+fn find_invite(
+    invites: &Arc<Mutex<Vec<Invite>>>,
+    secret: &[u8; 16],
+    now: u64,
+    joiner: &str,
+) -> Option<(String, bool)> {
     let invites = invites.lock().ok()?;
     let mut found = None;
     for invite in invites.iter() {
-        if invite.expires_at <= now {
+        if invite.expires_at <= now || invite.claimed_by.as_ref().is_some_and(|id| id != joiner) {
             continue;
         }
         let Some(bytes) = crate::hex_decode(&invite.secret) else {
@@ -395,7 +421,7 @@ fn find_invite(invites: &Arc<Mutex<Vec<Invite>>>, secret: &[u8; 16], now: u64) -
             diff |= a ^ b;
         }
         if diff == 0 {
-            found = Some(invite.id.clone());
+            found = Some((invite.id.clone(), invite.claimed_by.is_some()));
         }
     }
     found
@@ -447,17 +473,24 @@ pub(crate) async fn initiate_with_trust(
     let result = match reply {
         Wire::Ok { name, code } => {
             // Sanity: the host must show the same code we compute.
+            // No early return: dropping the connection closes it with code 0,
+            // which the host would take as installed trust.
             let expected = match_code(secret, host_id, &endpoint.id().to_string());
             if code != expected {
-                bail!("pairing code mismatch (expected {expected}, got {code})");
+                Err(anyhow::anyhow!(
+                    "pairing code mismatch (expected {expected}, got {code})"
+                ))
+            } else {
+                trust(&name).map(|()| name)
             }
-            trust(&name)?;
-            Ok(name)
         }
         Wire::Rejected { reason } => Err(anyhow::anyhow!("pairing rejected: {reason}")),
         Wire::Request { .. } => Err(anyhow::anyhow!("unexpected pairing reply")),
     };
-    conn.close(VarInt::from_u32(0), b"done");
+    // Code 0 tells the host trust is installed here; anything else lets it
+    // keep the invite open for a retry.
+    let code = if result.is_ok() { 0 } else { 1 };
+    conn.close(VarInt::from_u32(code), b"done");
     result
 }
 
@@ -475,11 +508,19 @@ mod tests {
             secret: crate::hex_encode(&secret),
             created_at: now,
             expires_at: now + 10,
+            claimed_by: None,
         }]));
-        assert_eq!(find_invite(&invites, &secret, now).as_deref(), Some("abc"));
-        assert!(find_invite(&invites, &[0u8; 16], now).is_none());
+        let found = |secret: &[u8; 16], now, joiner| {
+            find_invite(&invites, secret, now, joiner).map(|(id, _)| id)
+        };
+        assert_eq!(found(&secret, now, "j").as_deref(), Some("abc"));
+        assert!(found(&[0u8; 16], now, "j").is_none());
         // Expired.
-        assert!(find_invite(&invites, &secret, now + 11).is_none());
+        assert!(found(&secret, now + 11, "j").is_none());
+        // Claimed: only the claiming joiner may retry it.
+        invites.lock().unwrap()[0].claimed_by = Some("j".into());
+        assert_eq!(found(&secret, now, "j").as_deref(), Some("abc"));
+        assert!(found(&secret, now, "other").is_none());
     }
 
     async fn endpoint() -> iroh::Endpoint {
@@ -496,6 +537,7 @@ mod tests {
             secret: crate::hex_encode(secret),
             created_at: 0,
             expires_at: u64::MAX,
+            claimed_by: None,
         }
     }
 
@@ -522,9 +564,74 @@ mod tests {
         let host_id = host.id().to_string();
         let result = initiate(&joiner, host.addr(), &secret, "Joiner", &host_id).await;
         assert!(result.is_ok(), "{result:?}");
-        // The host added the joiner; its invite was consumed.
+        // The host added the joiner; its invite is spent once the joiner's
+        // confirming close arrives.
         assert_eq!(peers.lock().unwrap().as_slice(), &[joiner.id().to_string()]);
+        for _ in 0..100 {
+            if handler.invites.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         assert!(handler.invites.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn interrupted_completion_can_be_retried_by_the_same_joiner_only() {
+        let host = endpoint().await;
+        let joiner = endpoint().await;
+        let stranger = endpoint().await;
+        let peers = Arc::new(Mutex::new(Vec::<String>::new()));
+        let secret = crate::ticket::generate_secret();
+        let handler = Arc::new(PairHandler::new(
+            host.id().to_string(),
+            1,
+            Arc::new(Mutex::new(Store::default())),
+            peers.clone(),
+            Arc::new(Mutex::new(vec![invite_for(&secret)])),
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(HashMap::new())),
+        ));
+        let _router = iroh::protocol::Router::builder(host.clone())
+            .accept(ALPN, handler.clone())
+            .spawn();
+        let host_id = host.id().to_string();
+        let claimed = || {
+            let invites = handler.invites.lock().unwrap();
+            invites.first().and_then(|i| i.claimed_by.clone())
+        };
+
+        // The joiner fails to install trust after the host committed its own.
+        let failed = initiate_with_trust(&joiner, host.addr(), &secret, "Joiner", &host_id, |_| {
+            anyhow::bail!("disk full")
+        })
+        .await;
+        assert!(failed.is_err());
+        // The host notices once the joiner closes; the invite stays claimed.
+        for _ in 0..100 {
+            if claimed().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(claimed(), Some(joiner.id().to_string()));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(handler.invites.lock().unwrap().len(), 1);
+
+        // Nobody else can spend the claimed invite.
+        let other = initiate(&stranger, host.addr(), &secret, "Stranger", &host_id).await;
+        assert!(other.is_err());
+        // The same joiner retries the saved ticket and completes.
+        let retried = initiate(&joiner, host.addr(), &secret, "Joiner", &host_id).await;
+        assert!(retried.is_ok(), "{retried:?}");
+        for _ in 0..100 {
+            if handler.invites.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(handler.invites.lock().unwrap().is_empty());
+        assert_eq!(peers.lock().unwrap().as_slice(), &[joiner.id().to_string()]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
